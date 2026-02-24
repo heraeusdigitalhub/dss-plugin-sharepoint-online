@@ -1,11 +1,11 @@
 {
     "meta": {
-        "label": "SharePoint Online login",
-        "description": "",
+        "label": "SharePoint Online login (DEPRECATED)",
+        "description": "DEPRECATED: This authentication method (sharepy/forms-based login) has been removed. Please use 'app-username-password', 'app-certificate', 'site-app-permissions', or 'oauth' instead.",
         "icon": "icon-cloud"
     },
-    "defaultDefinableInline": true,
-    "defaultDefinableAtProjectLevel": true,
+    "defaultDefinableInline": false,
+    "defaultDefinableAtProjectLevel": false,
     "pluginParams": [],
     "params": [
         {

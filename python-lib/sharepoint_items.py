@@ -1,41 +1,43 @@
 import os.path
 
-from sharepoint_constants import SharePointConstants
 from datetime import datetime
 from common import get_lnt_path, get_rel_path
 
 
+# Key used by SharePointClient methods to wrap Graph driveItem arrays
+ITEMS_KEY = "items"
+
+
 def loop_sharepoint_items(items):
-    if SharePointConstants.RESULTS_CONTAINER_V2 not in items or SharePointConstants.RESULTS not in items[SharePointConstants.RESULTS_CONTAINER_V2]:
-        yield
-    for item in items[SharePointConstants.RESULTS_CONTAINER_V2][SharePointConstants.RESULTS]:
+    if ITEMS_KEY not in items or not items[ITEMS_KEY]:
+        return
+    for item in items[ITEMS_KEY]:
         yield item
 
 
 def extract_item_from(item_name, items):
     for item in loop_sharepoint_items(items):
-        if SharePointConstants.NAME in item and item[SharePointConstants.NAME] == item_name:
+        if item and "name" in item and item["name"] == item_name:
             return item
     return None
 
 
 def has_sharepoint_items(items):
-    if SharePointConstants.RESULTS_CONTAINER_V2 not in items or SharePointConstants.RESULTS not in items[SharePointConstants.RESULTS_CONTAINER_V2]:
+    if ITEMS_KEY not in items or not items[ITEMS_KEY]:
         return False
-    if len(items[SharePointConstants.RESULTS_CONTAINER_V2][SharePointConstants.RESULTS]) > 0:
-        return True
-    else:
-        return False
+    return len(items[ITEMS_KEY]) > 0
 
 
 def get_last_modified(item):
-    if SharePointConstants.TIME_LAST_MODIFIED in item:
-        return int(format_date(item[SharePointConstants.TIME_LAST_MODIFIED]))
+    if "lastModifiedDateTime" in item:
+        return int(format_date(item["lastModifiedDateTime"]))
+    return None
 
 
 def format_date(date):
     if date is not None:
-        utc_time = datetime.strptime(date, SharePointConstants.TIME_FORMAT)
+        # Graph API returns ISO 8601 dates like "2024-01-15T10:30:00Z"
+        utc_time = datetime.strptime(date, "%Y-%m-%dT%H:%M:%SZ")
         epoch_time = (utc_time - datetime(1970, 1, 1)).total_seconds()
         return int(epoch_time) * 1000
     else:
@@ -43,17 +45,11 @@ def format_date(date):
 
 
 def get_size(item):
-    if SharePointConstants.LENGTH in item:
-        return int(item[SharePointConstants.LENGTH])
-    else:
-        return 0
+    return int(item.get("size", 0))
 
 
 def get_name(item):
-    if SharePointConstants.NAME in item:
-        return item[SharePointConstants.NAME]
-    else:
-        return None
+    return item.get("name")
 
 
 def assert_path_is_not_root(path):

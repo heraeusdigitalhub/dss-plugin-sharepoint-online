@@ -9,11 +9,11 @@ logger = SafeLogger("sharepoint-online plugin", DSSConstants.SECRET_PARAMETERS_K
 
 
 def is_response_empty(response):
-    return SharePointConstants.RESULTS_CONTAINER_V2 not in response or SharePointConstants.RESULTS not in response[SharePointConstants.RESULTS_CONTAINER_V2]
+    return "value" not in response or len(response["value"]) == 0
 
 
 def extract_results(response):
-    return response[SharePointConstants.RESULTS_CONTAINER_V2][SharePointConstants.RESULTS]
+    return response["value"]
 
 
 def get_dss_type(sharepoint_type):
@@ -30,7 +30,7 @@ def column_ids_to_names(convert_table, sharepoint_row):
 
 
 def is_error(response):
-    return _has_error(response) and _has_message(response) and _has_value(response)
+    return _has_error(response) and _has_message(response)
 
 
 def _has_error(response):
@@ -38,11 +38,7 @@ def _has_error(response):
 
 
 def _has_message(response):
-    return SharePointConstants.MESSAGE in response[SharePointConstants.ERROR_CONTAINER]
-
-
-def _has_value(response):
-    return SharePointConstants.VALUE in response[SharePointConstants.ERROR_CONTAINER][SharePointConstants.MESSAGE]
+    return SharePointConstants.MESSAGE in response.get(SharePointConstants.ERROR_CONTAINER, {})
 
 
 def assert_list_title(list_title):
@@ -58,7 +54,7 @@ def dss_to_sharepoint_date(date):
 
 
 def sharepoint_to_dss_date(date):
-    sharepoint_formats = ["%m/%d/%Y", "%m/%d/%Y %I:%M %p"]
+    sharepoint_formats = ["%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S.%fZ", "%m/%d/%Y", "%m/%d/%Y %I:%M %p"]
     for sharepoint_format in sharepoint_formats:
         try:
             dss_date = format_date(date, sharepoint_format, DSSConstants.DATE_FORMAT)
@@ -199,9 +195,8 @@ class SharePointListWriter(object):
                     dss_column_name,
                     field_type=sharepoint_type
                 )
-                json = response.json()
-                self.sharepoint_column_ids[dss_column_name] = \
-                    json[SharePointConstants.RESULTS_CONTAINER_V2][SharePointConstants.STATIC_NAME]
+                json_response = response.json()
+                self.sharepoint_column_ids[dss_column_name] = json_response["name"]
                 self.client.add_column_to_list_default_view(dss_column_name, self.client.sharepoint_list_title)
             elif dss_column_name in self.sharepoint_existing_column_names:
                 self.sharepoint_column_ids[dss_column_name] = self.sharepoint_existing_column_entity_property_names[dss_column_name]

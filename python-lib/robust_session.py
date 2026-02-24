@@ -46,7 +46,7 @@ class RobustSession():
             return self.session.get(url, **kwargs)
         else:
             kwargs["url"] = url
-            response = self.request_with_403_retry("get", **kwargs)
+            response = self.request_with_403_retry("GET", **kwargs)
             return response
 
     def post(self, url, dku_rs_off=False, **kwargs):
@@ -56,13 +56,38 @@ class RobustSession():
             return response
         else:
             kwargs["url"] = url
-            response = self.request_with_403_retry("post", **kwargs)
+            response = self.request_with_403_retry("POST", **kwargs)
             return response
 
-    def merge(self, url, dku_rs_off=False, **kwargs):
+    def put(self, url, dku_rs_off=False, **kwargs):
         kwargs = update_dict_in_kwargs(kwargs, "headers", self.default_headers)
-        response = self.session.request("MERGE", url, **kwargs)
-        return response
+        if dku_rs_off:
+            response = self.session.put(url, **kwargs)
+            return response
+        else:
+            kwargs["url"] = url
+            response = self.request_with_403_retry("PUT", **kwargs)
+            return response
+
+    def patch(self, url, dku_rs_off=False, **kwargs):
+        kwargs = update_dict_in_kwargs(kwargs, "headers", self.default_headers)
+        if dku_rs_off:
+            response = self.session.patch(url, **kwargs)
+            return response
+        else:
+            kwargs["url"] = url
+            response = self.request_with_403_retry("PATCH", **kwargs)
+            return response
+
+    def delete(self, url, dku_rs_off=False, **kwargs):
+        kwargs = update_dict_in_kwargs(kwargs, "headers", self.default_headers)
+        if dku_rs_off:
+            response = self.session.delete(url, **kwargs)
+            return response
+        else:
+            kwargs["url"] = url
+            response = self.request_with_403_retry("DELETE", **kwargs)
+            return response
 
     def request_with_403_retry(self, verb, **kwargs):
         """
@@ -72,12 +97,10 @@ class RobustSession():
         attempt_number = 0
         attempt_number_on_403 = 0
         successful_request = False
+        response = None
         while (not successful_request) and (attempt_number <= self.max_retries):
             attempt_number += 1
-            if verb == "get":
-                response = self.retry(self.session.get, **kwargs)
-            else:
-                response = self.retry(self.session.post, **kwargs)
+            response = self.retry(self.session.request, verb, **kwargs)
             if response.status_code == 403 and self.attempt_session_reset_on_403:
                 if attempt_number_on_403 >= 1:
                     logger.error("Max number of 403 errors reached. Stopping the plugin to avoid the account to be locked out.")
@@ -95,6 +118,7 @@ class RobustSession():
     def retry(self, func, *args,  **kwargs):
         attempt_number = 0
         successful_func = False
+        response = None
         while (not successful_func) and (attempt_number <= self.max_retries):
             try:
                 attempt_number += 1

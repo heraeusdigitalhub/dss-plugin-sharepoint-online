@@ -1,24 +1,21 @@
 import os
 import requests
-import sharepy
+import msal
 import urllib.parse
 import logging
 import uuid
 import time
 import json
-import re
 
-from xml.etree.ElementTree import Element, tostring
-from xml.dom import minidom
 from robust_session import RobustSession
 from sharepoint_constants import SharePointConstants
 from sharepoint_lists import SharePointListWriter, get_dss_type
 from dss_constants import DSSConstants
 from common import (
-    is_email_address, get_value_from_path, parse_url,
-    get_value_from_paths, is_request_performed, ItemsLimit,
+    get_value_from_path, parse_url,
+    get_value_from_paths,
     is_empty_path, get_lnt_path,
-    format_private_key, format_certificate_thumbprint, url_encode
+    format_private_key, format_certificate_thumbprint
 )
 from safe_logger import SafeLogger
 
@@ -42,7 +39,6 @@ class SharePointClient():
         attempt_session_reset_on_403 = config.get("advanced_parameters", False) and config.get("attempt_session_reset_on_403", False)
         self.session = RobustSession(status_codes_to_retry=[429, 503], attempt_session_reset_on_403=attempt_session_reset_on_403)
         self.number_dumped_logs = 0
-        self.username_for_namespace_diag = None
 
         self.dss_column_name = {}
         self.column_ids = {}
@@ -51,6 +47,12 @@ class SharePointClient():
         self.columns_to_format = []
         self.column_sharepoint_type = {}
 
+        # Graph API IDs resolved after auth
+        self.site_id = None
+        self.drive_id = None
+        self._drive_path_prefix = ""
+        self._list_id_cache = {}
+
         if config.get('auth_type') == DSSConstants.AUTH_OAUTH:
             logger.info("SharePointClient:sharepoint_oauth")
             login_details = config.get('sharepoint_oauth')
@@ -58,41 +60,17 @@ class SharePointClient():
             self.setup_login_details(login_details)
             self.apply_paths_overwrite(config)
             self.setup_sharepoint_online_url(login_details)
-            self.sharepoint_access_token = login_details['sharepoint_oauth']
-            self.session.update_settings(session=SharePointSession(
-                    None,
-                    None,
-                    self.sharepoint_url,
-                    self.sharepoint_site,
-                    sharepoint_access_token=self.sharepoint_access_token
-                ),
+            access_token = login_details['sharepoint_oauth']
+            self.session.update_settings(
+                session=GraphSession(access_token),
                 max_retries=SharePointConstants.MAX_RETRIES,
                 base_retry_timer_sec=SharePointConstants.WAIT_TIME_BEFORE_RETRY_SEC
             )
         elif config.get('auth_type') == DSSConstants.AUTH_LOGIN:
-            logger.info("SharePointClient:sharepoint_sharepy")
-            login_details = config.get('sharepoint_sharepy')
-            self.assert_login_details(DSSConstants.LOGIN_DETAILS, login_details)
-            self.setup_login_details(login_details)
-            self.apply_paths_overwrite(config)
-            username = login_details['sharepoint_username']
-            password = login_details['sharepoint_password']
-            self.assert_email_address(username)
-            self.username_for_namespace_diag = username  # stored for possible 403 diagnostic
-            self.setup_sharepoint_online_url(login_details)
-            # Throttling is harsher for username/password authenticated users
-            # https://www.netwoven.com/2021/01/27/how-to-avoid-throttling-or-getting-blocked-in-sharepoint-online-using-sharepoint-app-authentication/
-            self.session.update_settings(max_retries=5, base_retry_timer_sec=120)  # Yeah !
-            # If several python workers are on the job, opening the session in itslef could be an issue
-            self.session.connect(
-                connection_library=sharepy,
-                site=self.sharepoint_url,
-                username=username,
-                password=password
+            raise SharePointClientError(
+                "AUTH_LOGIN (sharepy) has been removed. "
+                "Please use 'app-username-password', 'app-certificate', 'site-app-permissions', or 'oauth' instead."
             )
-            self.form_digest_value = get_form_digest_value(self.sharepoint_url, self.sharepoint_site, session=self.session)
-            default_headers = {"X-RequestDigest": self.form_digest_value} if self.form_digest_value else None
-            self.session.update_settings(default_headers=default_headers)
         elif config.get('auth_type') == DSSConstants.AUTH_SITE_APP:
             logger.info("SharePointClient:site_app_permissions")
             login_details = config.get('site_app_permissions')
@@ -103,14 +81,9 @@ class SharePointClient():
             self.tenant_id = login_details.get("tenant_id")
             self.client_secret = login_details.get("client_secret")
             self.client_id = login_details.get("client_id")
-            self.sharepoint_access_token = self.get_site_app_access_token()
-            self.session.update_settings(session=SharePointSession(
-                    None,
-                    None,
-                    self.sharepoint_url,
-                    self.sharepoint_site,
-                    sharepoint_access_token=self.sharepoint_access_token
-                ),
+            access_token = self._get_site_app_access_token()
+            self.session.update_settings(
+                session=GraphSession(access_token),
                 max_retries=SharePointConstants.MAX_RETRIES,
                 base_retry_timer_sec=SharePointConstants.WAIT_TIME_BEFORE_RETRY_SEC
             )
@@ -126,20 +99,16 @@ class SharePointClient():
             self.client_certificate_thumbprint = format_certificate_thumbprint(login_details.get("client_certificate_thumbprint"))
             self.passphrase = login_details.get("passphrase")
             self.client_id = login_details.get("client_id")
-            self.sharepoint_access_token = self.get_certificate_app_access_token()
-            self.session.update_settings(session=SharePointSession(
-                    None,
-                    None,
-                    self.sharepoint_url,
-                    self.sharepoint_site,
-                    sharepoint_access_token=self.sharepoint_access_token
-                ),
+            access_token = self._get_certificate_app_access_token()
+            self.session.update_settings(
+                session=GraphSession(access_token),
                 max_retries=SharePointConstants.MAX_RETRIES,
                 base_retry_timer_sec=SharePointConstants.WAIT_TIME_BEFORE_RETRY_SEC
             )
         elif config.get('auth_type') == DSSConstants.AUTH_APP_USERNAME_PASSWORD:
             logger.info("SharePointClient:app-username-password")
             login_details = config.get('app_username_password')
+            self.assert_login_details(DSSConstants.APP_USERNAME_PASSWORD_DETAILS, login_details)
             self.setup_sharepoint_online_url(login_details)
             self.setup_login_details(login_details)
             self.apply_paths_overwrite(config)
@@ -148,19 +117,15 @@ class SharePointClient():
             self.sharepoint_tenant = login_details.get("sharepoint_tenant")
             username = login_details.get("username")
             password = login_details.get("password")
-            self.sharepoint_access_token = self.get_username_password_access_token(username, password)
-            self.session.update_settings(session=SharePointSession(
-                    None,
-                    None,
-                    self.sharepoint_url,
-                    self.sharepoint_site,
-                    sharepoint_access_token=self.sharepoint_access_token
-                ),
+            access_token = self._get_username_password_access_token(username, password)
+            self.session.update_settings(
+                session=GraphSession(access_token),
                 max_retries=SharePointConstants.MAX_RETRIES,
                 base_retry_timer_sec=SharePointConstants.WAIT_TIME_BEFORE_RETRY_SEC
             )
         else:
             raise SharePointClientError("The type of authentication is not selected")
+
         self.sharepoint_list_title = config.get("sharepoint_list_title")
         logging.getLogger("urllib3").setLevel(logging.WARNING)
         try:
@@ -169,9 +134,11 @@ class SharePointClient():
         except Exception as err:
             logging.warning("Error while adding filter to urllib3.connectionpool logs: {}".format(err))
 
-    def assert_email_address(self, username):
-        if not is_email_address(username):
-            raise SharePointClientError("Sharepoint-Online's username should be an email address")
+        # Resolve Graph API site and drive IDs
+        self._resolve_site_id()
+        self._resolve_drive_id()
+
+    # ---- Setup methods ----
 
     def setup_login_details(self, login_details):
         self.sharepoint_site = login_details.get('sharepoint_site', "").strip("/")
@@ -211,127 +178,201 @@ class SharePointClient():
             )
         )
 
-    def get_folders(self, path):
-        url = self.get_folder_url() + "/Folders/{}".format(
-            self.get_path_as_query_string(path)
-        )
+    # ---- Graph API resolution methods ----
+
+    def _resolve_site_id(self):
+        if self.sharepoint_site:
+            url = "{}/sites/{}:/{}".format(
+                SharePointConstants.GRAPH_API_BASE_URL,
+                self.sharepoint_url,
+                self.sharepoint_site
+            )
+        else:
+            url = "{}/sites/{}".format(
+                SharePointConstants.GRAPH_API_BASE_URL,
+                self.sharepoint_url
+            )
         response = self.session.get(url)
-        self.assert_response_ok(response, calling_method="get_folders")
-        return response.json()
+        self.assert_response_ok(response, calling_method="_resolve_site_id")
+        self.site_id = response.json()["id"]
+        logger.info("Resolved site_id={}".format(self.site_id))
+
+    def _resolve_drive_id(self):
+        root_parts = self.sharepoint_root.split("/", 1) if self.sharepoint_root else [""]
+        root_library_name = root_parts[0]
+        remaining_path = root_parts[1] if len(root_parts) > 1 else ""
+
+        # List all drives to find one matching the root library name
+        url = "{}/sites/{}/drives".format(SharePointConstants.GRAPH_API_BASE_URL, self.site_id)
+        response = self.session.get(url)
+        self.assert_response_ok(response, calling_method="_resolve_drive_id")
+        drives = response.json().get("value", [])
+
+        for drive in drives:
+            if drive.get("name") == root_library_name:
+                self.drive_id = drive["id"]
+                self._drive_path_prefix = remaining_path
+                logger.info("Resolved drive_id={} (by name), path_prefix={}".format(self.drive_id, self._drive_path_prefix))
+                return
+            web_url = drive.get("webUrl", "")
+            if web_url.endswith("/" + root_library_name):
+                self.drive_id = drive["id"]
+                self._drive_path_prefix = remaining_path
+                logger.info("Resolved drive_id={} (by webUrl), path_prefix={}".format(self.drive_id, self._drive_path_prefix))
+                return
+
+        # No match: fall back to default drive, use full sharepoint_root as path prefix
+        default_url = "{}/sites/{}/drive".format(SharePointConstants.GRAPH_API_BASE_URL, self.site_id)
+        default_response = self.session.get(default_url)
+        self.assert_response_ok(default_response, calling_method="_resolve_drive_id:default")
+        self.drive_id = default_response.json()["id"]
+        self._drive_path_prefix = self.sharepoint_root
+        logger.info("Resolved drive_id={} (default), path_prefix={}".format(self.drive_id, self._drive_path_prefix))
+
+    def _resolve_list_id(self, list_title):
+        if list_title in self._list_id_cache:
+            return self._list_id_cache[list_title]
+        url = "{}/sites/{}/lists".format(SharePointConstants.GRAPH_API_BASE_URL, self.site_id)
+        params = {"$filter": "displayName eq '{}'".format(list_title.replace("'", "''"))}
+        response = self.session.get(url, params=params)
+        self.assert_response_ok(response, calling_method="_resolve_list_id")
+        lists = response.json().get("value", [])
+        if not lists:
+            raise SharePointClientError("List '{}' not found".format(list_title))
+        list_id = lists[0]["id"]
+        self._list_id_cache[list_title] = list_id
+        return list_id
+
+    # ---- URL/path helpers ----
+
+    def _build_drive_path(self, path):
+        parts = []
+        if self._drive_path_prefix:
+            parts.append(self._drive_path_prefix.strip("/"))
+        if path:
+            clean_path = path.strip("/")
+            if clean_path:
+                parts.append(clean_path)
+        return "/".join(parts)
+
+    def _get_drive_item_url(self, path, suffix=""):
+        full_path = self._build_drive_path(path)
+        if full_path:
+            encoded_path = urllib.parse.quote(full_path, safe="/")
+            if suffix:
+                return "{}/drives/{}/root:/{}:{}".format(
+                    SharePointConstants.GRAPH_API_BASE_URL, self.drive_id, encoded_path, suffix)
+            else:
+                return "{}/drives/{}/root:/{}".format(
+                    SharePointConstants.GRAPH_API_BASE_URL, self.drive_id, encoded_path)
+        else:
+            return "{}/drives/{}/root{}".format(
+                SharePointConstants.GRAPH_API_BASE_URL, self.drive_id, suffix)
+
+    def _get_list_url(self, list_id=None):
+        if list_id:
+            return "{}/sites/{}/lists/{}".format(
+                SharePointConstants.GRAPH_API_BASE_URL, self.site_id, list_id)
+        return "{}/sites/{}/lists".format(
+            SharePointConstants.GRAPH_API_BASE_URL, self.site_id)
+
+    # ---- File/folder operations ----
+
+    def _get_all_children(self, path):
+        url = self._get_drive_item_url(path, suffix="/children")
+        all_items = []
+        while url:
+            response = self.session.get(url)
+            if response.status_code == 404:
+                return []
+            self.assert_response_ok(response, calling_method="_get_all_children")
+            json_response = response.json()
+            all_items.extend(json_response.get("value", []))
+            url = json_response.get("@odata.nextLink")
+        return all_items
+
+    def get_folders(self, path):
+        items = self._get_all_children(path)
+        folders = [item for item in items if "folder" in item]
+        return {"items": folders}
 
     def get_files(self, path):
-        response = self.session.get(self.get_folder_url() + "/Files/{}".format(
-                self.get_path_as_query_string(path)
-            )
-        )
-        self.assert_response_ok(response, calling_method="get_files")
-        return response.json()
-
-    def get_item_fields(self, path):
-        response = self.session.get(self.get_folder_url() + "/ListItemAllFields{}".format(
-            self.get_path_as_query_string(path)
-        ))
-        self.assert_response_ok(response, calling_method="get_item_fields")
-        return response.json()
-
-    def get_start_upload_url(self, path, upload_id):
-        return self.get_file_url() + "/startupload(uploadId=guid'{}'){}".format(
-            upload_id,
-            self.get_path_as_query_string(path)
-        )
-
-    def get_continue_upload_url(self, path, upload_id, file_offset):
-        return self.get_file_url() + "/continueupload(uploadId=guid'{}',fileOffset={}){}".format(
-            upload_id,
-            file_offset,
-            self.get_path_as_query_string(path)
-        )
-
-    def get_finish_upload_url(self, path, upload_id, file_offset):
-        return self.get_file_url() + "/finishupload(uploadId=guid'{}',fileOffset={}){}".format(
-            upload_id,
-            file_offset,
-            self.get_path_as_query_string(path)
-        )
+        items = self._get_all_children(path)
+        files = [item for item in items if "file" in item]
+        return {"items": files}
 
     def is_file(self, path):
-        item_fields = self.get_item_fields(path)
-        file_system_object_type = item_fields.get(SharePointConstants.RESULTS_CONTAINER_V2, {}).get(SharePointConstants.FILE_SYSTEM_OBJECT_TYPE)
-        return (file_system_object_type == SharePointConstants.FILE)
+        url = self._get_drive_item_url(path)
+        response = self.session.get(url)
+        if response.status_code == 404:
+            return False
+        self.assert_response_ok(response, calling_method="is_file")
+        return "file" in response.json()
 
     def get_file_content(self, full_path):
-        response = self.session.get(
-            self.get_file_content_url(full_path)
-        )
+        url = self._get_drive_item_url(full_path, suffix="/content")
+        response = self.session.get(url)
         self.assert_response_ok(response, no_json=True, calling_method="get_file_content")
         return response
 
     def write_file_content(self, full_path, data):
-        self.file_size = len(data)
-
-        # Preventive file check out, in case it already exists on SP's side
+        file_size = len(data)
         self.check_out_file(full_path)
-
-        if self.file_size < SharePointConstants.MAX_FILE_SIZE_CONTINUOUS_UPLOAD:
-            # below 262MB, the file can be uploaded in one go
-            self.write_full_file_content(full_path, data)
+        if file_size <= SharePointConstants.GRAPH_MAX_SIMPLE_UPLOAD_SIZE:
+            self._write_simple_upload(full_path, data)
         else:
-            # Start by creating an empty file. Thanks, MS doc, not.
-            self.write_full_file_content(full_path, [])
-            self.write_chunked_file_content(full_path, data)
+            self._write_upload_session(full_path, data, file_size)
 
-    def write_full_file_content(self, full_path, data):
-        full_path_parent, file_name = os.path.split(full_path)
+    def _write_simple_upload(self, full_path, data):
+        url = self._get_drive_item_url(full_path, suffix="/content")
         headers = {
-            "Content-Length": "{}".format(len(data))
+            "Content-Type": "application/octet-stream",
+            "Content-Length": str(len(data))
         }
-        response = self.session.post(
-            self.get_file_add_url(
-                full_path_parent,
-                file_name
-            ),
-            headers=headers,
-            data=data
-        )
+        response = self.session.put(url, headers=headers, data=data)
         self.assert_response_ok(response, calling_method="write_file_content")
         return response
 
-    def write_chunked_file_content(self, full_path, data):
-        is_initial_chunk = True
-        is_last_chunk = False
-        chunk_size = SharePointConstants.FILE_UPLOAD_CHUNK_SIZE
-        save_upload_offset = 0
-        upload_id = self.get_random_guid()
-        while save_upload_offset < self.file_size:
-            next_save_upload_offset = save_upload_offset + chunk_size
-            if next_save_upload_offset >= self.file_size:
-                is_last_chunk = True
-                next_save_upload_offset = self.file_size
-            if is_initial_chunk:
-                is_initial_chunk = False
-                logger.info("write_chunked_file_content:start_upload")
-                url = self.get_start_upload_url(full_path, upload_id)
-            elif is_last_chunk:
-                logger.info("write_chunked_file_content:finish_upload")
-                url = self.get_finish_upload_url(full_path, upload_id, save_upload_offset)
-            else:
-                logger.info("write_chunked_file_content:continue_upload")
-                url = self.get_continue_upload_url(full_path, upload_id, save_upload_offset)
-            logger.info("write_chunked_file_content from {} to {}".format(save_upload_offset, next_save_upload_offset))
-            response = self.session.post(
-                url,
-                data=data[save_upload_offset:next_save_upload_offset]
-            )
-            save_upload_offset = next_save_upload_offset
-            self.assert_response_ok(response, calling_method="write_chunked_file_content")
-        return response
+    def _write_upload_session(self, full_path, data, file_size):
+        url = self._get_drive_item_url(full_path, suffix="/createUploadSession")
+        session_response = self.session.post(url, json={
+            "item": {"@microsoft.graph.conflictBehavior": "replace"}
+        })
+        self.assert_response_ok(session_response, calling_method="create_upload_session")
+        upload_url = session_response.json()["uploadUrl"]
+
+        chunk_size = SharePointConstants.GRAPH_UPLOAD_CHUNK_SIZE
+        offset = 0
+        while offset < file_size:
+            chunk_end = min(offset + chunk_size, file_size)
+            chunk_data = data[offset:chunk_end]
+            content_range = "bytes {}-{}/{}".format(offset, chunk_end - 1, file_size)
+            headers = {
+                "Content-Length": str(len(chunk_data)),
+                "Content-Range": content_range
+            }
+            logger.info("Uploading chunk: {}".format(content_range))
+            # Upload chunks go directly to the pre-signed upload URL (no Bearer token needed)
+            chunk_response = requests.put(upload_url, headers=headers, data=chunk_data,
+                                          timeout=SharePointConstants.TIMEOUT_SEC)
+            if chunk_response.status_code not in [200, 201, 202]:
+                raise SharePointClientError("Upload chunk failed with status {}: {}".format(
+                    chunk_response.status_code, chunk_response.content))
+            offset = chunk_end
 
     def create_folder(self, full_path):
         if is_empty_path(full_path) and is_empty_path(self.sharepoint_root):
-            return
-        response = self.session.post(
-            self.get_add_folder_url(full_path)
-        )
+            return None
+        parent_path, folder_name = os.path.split(full_path.rstrip("/"))
+        if not folder_name:
+            return None
+        url = self._get_drive_item_url(parent_path, suffix="/children")
+        body = {
+            "name": folder_name,
+            "folder": {},
+            "@microsoft.graph.conflictBehavior": "fail"
+        }
+        response = self.session.post(url, json=body)
         return response
 
     def create_path(self, file_full_path):
@@ -349,146 +390,171 @@ class SharePointClient():
             previous_path = path
             path = get_lnt_path(path + "/" + token)
             response = self.create_folder(path)
-            status_code = response.status_code
-            if previous_status == 403 and status_code == 404:
-                logger.error("Could not create folder for '{}'. Check your write permission for the folder {}.".format(path, previous_path))
+            if response is not None:
+                status_code = response.status_code
+                if previous_status == 403 and status_code == 404:
+                    logger.error("Could not create folder for '{}'. Check your write permission for the folder {}.".format(path, previous_path))
+                previous_status = status_code
 
-    def move_file(self, full_from_path, full_to_path):        
-        get_move_url = self.get_move_url(
-            full_from_path,
-            full_to_path
-        )
-        response = self.session.post(get_move_url)
+    def move_file(self, full_from_path, full_to_path):
+        to_parent, to_name = os.path.split(full_to_path.rstrip("/"))
+        url = self._get_drive_item_url(full_from_path)
+        body = {"name": to_name}
+
+        from_parent, _ = os.path.split(full_from_path.rstrip("/"))
+        if from_parent != to_parent:
+            parent_url = self._get_drive_item_url(to_parent)
+            parent_response = self.session.get(parent_url)
+            self.assert_response_ok(parent_response, calling_method="move_file:get_parent")
+            parent_id = parent_response.json()["id"]
+            body["parentReference"] = {"id": parent_id}
+
+        response = self.session.patch(url, json=body)
         self.assert_response_ok(response, calling_method="move_file")
         return response.json()
 
     def check_in_file(self, full_path):
         logger.info("Checking in {}.".format(full_path))
-        file_check_in_url = self.get_file_check_in_url(full_path)
-        self.session.post(file_check_in_url)
-        return
+        url = self._get_drive_item_url(full_path, suffix="/checkin")
+        self.session.post(url, json={"comment": "", "checkInAs": "major"})
 
     def check_out_file(self, full_path):
         logger.info("Checking out {}.".format(full_path))
-        file_check_out_url = self.get_file_check_out_url(full_path)
-        self.session.post(file_check_out_url)
-        return
+        url = self._get_drive_item_url(full_path, suffix="/checkout")
+        self.session.post(url)
 
     def recycle_file(self, full_path):
-        recycle_file_url = self.get_recycle_file_url(full_path)
-        response = self.session.post(recycle_file_url)
-        self.assert_response_ok(response, calling_method="recycle_file")
+        url = self._get_drive_item_url(full_path)
+        response = self.session.delete(url)
+        self.assert_response_ok(response, no_json=True, calling_method="recycle_file")
 
     def recycle_folder(self, full_path):
-        recycle_folder_url = self.get_recycle_folder_url(full_path)
-        response = self.session.post(recycle_folder_url)
-        self.assert_response_ok(response, calling_method="recycle_folder")
+        url = self._get_drive_item_url(full_path)
+        response = self.session.delete(url)
+        self.assert_response_ok(response, no_json=True, calling_method="recycle_folder")
+
+    # ---- List operations ----
 
     def get_list_fields(self, list_title):
-        list_fields_url = self.get_list_fields_url(list_title)
-        response = self.session.get(
-            list_fields_url
-        )
+        list_id = self._resolve_list_id(list_title)
+        url = "{}/columns".format(self._get_list_url(list_id))
+        response = self.session.get(url)
         self.assert_response_ok(response, calling_method="get_list_fields")
-        json_response = response.json()
-        if self.is_response_empty(json_response):
+        columns = response.json().get("value", [])
+        if not columns:
             return None
-        return self.extract_results(json_response)
+        return self._transform_columns_to_sp_format(columns)
+
+    def _transform_columns_to_sp_format(self, graph_columns):
+        result = []
+        for col in graph_columns:
+            sp_type = self._get_sp_type_from_graph_column(col)
+            result.append({
+                SharePointConstants.TITLE_COLUMN: col.get("displayName", ""),
+                SharePointConstants.TYPE_AS_STRING: sp_type,
+                SharePointConstants.STATIC_NAME: col.get("name", ""),
+                SharePointConstants.INTERNAL_NAME: col.get("name", ""),
+                SharePointConstants.ENTITY_PROPERTY_NAME: col.get("name", ""),
+                SharePointConstants.HIDDEN_COLUMN: col.get("hidden", False) or False,
+                SharePointConstants.READ_ONLY_FIELD: col.get("readOnly", False) or False,
+            })
+        return result
 
     @staticmethod
-    def is_response_empty(response):
-        return SharePointConstants.RESULTS_CONTAINER_V2 not in response or SharePointConstants.RESULTS not in response[SharePointConstants.RESULTS_CONTAINER_V2]
-
-    @staticmethod
-    def extract_results(response):
-        return response[SharePointConstants.RESULTS_CONTAINER_V2][SharePointConstants.RESULTS]
+    def _get_sp_type_from_graph_column(column):
+        for graph_type, sp_type in SharePointConstants.GRAPH_TO_SP_TYPE_MAP.items():
+            if graph_type in column:
+                if graph_type == "text" and column.get("text", {}).get("allowMultipleLines", False):
+                    return "Note"
+                return sp_type
+        return SharePointConstants.FALLBACK_TYPE
 
     def get_list_items(self, list_title, params=None):
         params = params or {}
-        data = {
-            "parameters": {
-                "__metadata": {
-                    "type": "SP.RenderListDataParameters"
-                },
-                "RenderOptions": SharePointConstants.RENDER_OPTIONS,
-                "AllowMultipleValueFilterForTaxonomyFields": True,
-                "AddRequiredFields": True
-            }
+        list_id = self._resolve_list_id(list_title)
+        url = "{}/items".format(self._get_list_url(list_id))
+        graph_params = {
+            "$expand": "fields",
+            "$top": "100"
         }
-        headers = DSSConstants.JSON_HEADERS
-        response = self.session.post(
-            self.get_list_data_as_stream(list_title),
-            params=params,
-            headers=headers,
-            json=data
-        )
+        graph_params.update(params)
+        response = self.session.get(url, params=graph_params)
         self.assert_response_ok(response, calling_method="get_list_items")
-        return response.json().get("ListData", {})
+        json_response = response.json()
+
+        rows = []
+        for item in json_response.get("value", []):
+            fields = item.get("fields", {})
+            rows.append(fields)
+
+        result = {"Row": rows}
+        next_link = json_response.get("@odata.nextLink")
+        if next_link:
+            result["NextHref"] = next_link
+        return result
 
     def create_list(self, list_name):
-        headers = DSSConstants.JSON_HEADERS
-        data = {
-            '__metadata': {
-                'type': 'SP.List'
-            },
-            'AllowContentTypes': True,
-            'BaseTemplate': 100,
-            'ContentTypesEnabled': True,
-            'Title': list_name
+        url = self._get_list_url()
+        body = {
+            "displayName": list_name,
+            "list": {"template": "genericList"}
         }
-        response = self.session.post(
-            self.get_lists_url(),
-            headers=headers,
-            json=data
-        )
+        response = self.session.post(url, json=body)
         self.assert_response_ok(response, calling_method="create_list")
-        json = response.json()
-        return json.get(SharePointConstants.RESULTS_CONTAINER_V2, {})
+        json_response = response.json()
+
+        list_id = json_response.get("id", "")
+        display_name = json_response.get("displayName", list_name)
+        name = json_response.get("name", display_name)
+
+        self._list_id_cache[list_name] = list_id
+        self._list_id_cache[name] = list_id
+
+        return {
+            "EntityTypeName": name,
+            "ListItemEntityTypeFullName": "SP.Data.{}ListItem".format(name),
+            "Id": list_id
+        }
 
     def recycle_list(self, list_name):
-        headers = DSSConstants.JSON_HEADERS
-        response = self.session.post(
-            self.get_lists_by_title_url(list_name)+"/recycle()",
-            headers=headers
-        )
+        try:
+            list_id = self._resolve_list_id(list_name)
+        except SharePointClientError:
+            return None
+        url = self._get_list_url(list_id)
+        response = self.session.delete(url)
+        self._list_id_cache.pop(list_name, None)
         return response
 
     def get_list_metadata(self, list_name):
-        headers = DSSConstants.JSON_HEADERS
-        response = self.session.get(
-            self.get_lists_by_title_url(list_name),
-            headers=headers
-        )
-        self.assert_response_ok(response, calling_method="get_list_default_view")
+        list_id = self._resolve_list_id(list_name)
+        url = self._get_list_url(list_id)
+        response = self.session.get(url)
+        self.assert_response_ok(response, calling_method="get_list_metadata")
         json_response = response.json()
-        return json_response.get(SharePointConstants.RESULTS_CONTAINER_V2, {})
+
+        name = json_response.get("name", list_name)
+        self._list_id_cache[name] = list_id
+
+        return {
+            "EntityTypeName": name,
+            "ListItemEntityTypeFullName": "SP.Data.{}ListItem".format(name),
+            "Id": json_response.get("id", ""),
+        }
 
     def get_web_name(self, created_list):
-        root_folder_url = get_value_from_path(created_list, ['RootFolder', '__deferred', 'uri'])
-        headers = DSSConstants.JSON_HEADERS
-        response = self.session.get(
-            root_folder_url,
-            headers=headers
-        )
-        json_response = response.json()
-        return get_value_from_path(json_response, [SharePointConstants.RESULTS_CONTAINER_V2, "Name"])
+        return created_list.get("EntityTypeName", "")
 
     def create_custom_field_via_id(self, list_id, field_title, field_type=None):
         field_type = SharePointConstants.FALLBACK_TYPE if field_type is None else field_type
-        schema_xml = self.get_schema_xml(field_title, field_type)
+        url = "{}/columns".format(self._get_list_url(list_id))
         body = {
-            'parameters': {
-                '__metadata': {'type': 'SP.XmlSchemaFieldCreationInformation'},
-                'SchemaXml': schema_xml
-            }
+            "name": field_title,
+            "displayName": field_title,
         }
-        headers = DSSConstants.JSON_HEADERS
-        guid_lists_add_field_url = self.get_guid_lists_add_field_url(list_id)
-        response = self.session.post(
-            guid_lists_add_field_url,
-            headers=headers,
-            json=body
-        )
+        type_config = SharePointConstants.GRAPH_COLUMN_TYPE_MAP.get(field_type, {"text": {}})
+        body.update(type_config)
+        response = self.session.post(url, json=body)
         self.assert_response_ok(response, calling_method="create_custom_field_via_id")
         return response
 
@@ -496,496 +562,163 @@ class SharePointClient():
         logger.info("updating field {}/{} to type {}".format(field, column_name, new_field_type))
         if not new_field_type:
             return None
-        body = {
-            "__metadata": {
-                "type": "{}".format(new_field_type)
-            },
-            "Description": "Updated Description of the field",
-            "SchemaXml": "<Field AppendOnly='FALSE' ClientSideComponentId='00000000-0000-0000-0000-000000000000'"
-            + " Description='Updated Description of the field' DisplayName='{}' Format='Dropdown' IsModern='TRUE'".format(column_name)
-            + " IsolateStyles='FALSE' Name='{}' RichText='FALSE' RichTextMode='Compatible' Title='{}' Type='Note'></Field>".format(
-                column_name, column_name
-            ),
-            "Title": "{}".format(column_name)
-        }
-        headers = DSSConstants.JSON_HEADERS
-        url = "{}/Lists(guid'{}')/Fields/getByInternalNameOrTitle('{}')".format(self.get_base_url(), list_id, field)
-        response = self.session.merge(
-            url,
-            headers=headers,
-            json=body
-        )
-        return response
 
-    def get_list_default_view(self, list_name):
-        list_default_view_url = self.get_list_default_view_url(list_name)
-        response = self.session.get(
-            list_default_view_url
-        )
-        if response.status_code == 404:
-            return []
-        self.assert_response_ok(response, calling_method="get_list_default_view")
-        json_response = response.json()
-        return json_response.get(SharePointConstants.RESULTS_CONTAINER_V2, {"Items": {"results": []}}).get("Items", {"results": []}).get("results", [])
+        url = "{}/columns".format(self._get_list_url(list_id))
+        response = self.session.get(url)
+        self.assert_response_ok(response, calling_method="update_column_type:get_columns")
+        columns = response.json().get("value", [])
+
+        column_id = None
+        for col in columns:
+            if col.get("name") == field or col.get("displayName") == column_name:
+                column_id = col.get("id")
+                break
+
+        if not column_id:
+            raise SharePointClientError("Column '{}' not found in list".format(field))
+
+        patch_url = "{}/columns/{}".format(self._get_list_url(list_id), column_id)
+        body = {"text": {"allowMultipleLines": True}}
+        response = self.session.patch(patch_url, json=body)
+        self.assert_response_ok(response, calling_method="update_column_type")
+        return response
 
     def add_column_to_list_default_view(self, column_name, list_name):
-        escaped_column_name = self.escape_path(column_name)
-        list_default_view_url = os.path.join(
-            self.get_list_default_view_url(list_name),
-            "addviewfield('{}')".format(urllib.parse.quote(escaped_column_name))
-        )
-        response = self.session.post(
-            list_default_view_url
-        )
-        return response
+        # No-op for Graph API: columns are visible by default
+        return None
 
-    @staticmethod
-    def get_schema_xml(encoded_field_title, field_type):
-        field = Element('Field')
-        field.set('encoding', 'UTF-8')
-        field.set('DisplayName', encoded_field_title)
-        field.set('Format', 'Dropdown')
-        field.set('MaxLength', '255')
-        field.set('Type', field_type)
-        rough_string = tostring(field, 'utf-8')
-        reparsed = minidom.parseString(rough_string)
-        return reparsed.toprettyxml()
+    def get_list_default_view(self, list_name):
+        return []
 
-    def add_list_item(self, list_title, item):
-        item["__metadata"] = {
-            "type": "SP.Data.{}ListItem".format(list_title.capitalize().replace(" ", "_x0020_"))
-        }
-        headers = {
-            "Content-Type": DSSConstants.APPLICATION_JSON
-        }
-        response = self.session.post(
-            self.get_list_items_url(list_title),
-            json=item,
-            headers=headers
-        )
-        self.assert_response_ok(response, calling_method="add_list_item")
-        return response
+    def get_view_id(self, list_title, view_title):
+        if not list_title:
+            return None
+        logger.warning("List view filtering is not supported with Graph API. View '{}' will be ignored.".format(view_title))
+        return None
 
-    def add_list_item_by_id(self, list_id, list_item_full_name, item):
-        item["__metadata"] = {
-            "type": "{}".format(list_item_full_name)
-        }
-        headers = {
-            "Content-Type": DSSConstants.APPLICATION_JSON
-        }
-        list_items_url = self.get_list_items_url_by_id(list_id)
-
-        response = self.session.post(
-            list_items_url,
-            json=item,
-            headers=headers
-        )
-        self.assert_response_ok(response, calling_method="add_list_item_by_id")
-        return response
+    # ---- Batch operations ----
 
     def get_add_list_item_kwargs(self, list_title, item):
-        headers = DSSConstants.JSON_HEADERS
+        if list_title in self._list_id_cache:
+            list_id = self._list_id_cache[list_title]
+        else:
+            list_id = self._resolve_list_id(list_title)
 
-        list_items_url = self.get_list_add_item_using_path_url(list_title)
-        item_structure = self.get_item_structure(list_title, item)
-
-        kwargs = {
-            "verb": "post",
-            "url": list_items_url,
-            "json": item_structure,
-            "headers": headers
-        }
-
-        return kwargs
-
-    def get_item_structure(self, list_title, item):
-        list_item_create_info = self.get_list_item_create_info(list_title)
-        form_values = []
-        for field_name in item:
-            if item[field_name] is not None and item[field_name] != "":
-                #  Some columns (Title) can't be field with None or ""
-                form_values.append(self.get_form_value(field_name, item[field_name]))
-        form_values.append(self.get_form_value("ContentType", "Item"))
         return {
-            "listItemCreateInfo": list_item_create_info,
-            "formValues": form_values,
-            "bNewDocumentUpdate": False,
-            "checkInComment": None
-        }
-
-    @staticmethod
-    def get_form_value(field_name, field_value):
-        return {
-            "FieldName": field_name,
-            "FieldValue": field_value,
-            "HasException": False,
-            "ErrorMessage": None
-        }
-
-    def get_list_item_create_info(self, list_title):
-        return {
-            "__metadata": {
-                "type": "SP.ListItemCreationInformationUsingPath"
-            },
-            "FolderPath": {
-                "__metadata": {
-                    "type": "SP.ResourcePath"
-                },
-                "DecodedUrl": "/{}/Lists/{}".format(self.sharepoint_site, list_title)
-            }
+            "method": "POST",
+            "url": "/sites/{}/lists/{}/items".format(self.site_id, list_id),
+            "body": {"fields": item},
+            "headers": {"Content-Type": "application/json"}
         }
 
     def process_batch(self, kwargs_array):
-        batch_id = self.get_random_guid()
-        change_set_id = self.get_random_guid()
+        all_responses = []
+        for chunk_start in range(0, len(kwargs_array), SharePointConstants.GRAPH_BATCH_LIMIT):
+            chunk = kwargs_array[chunk_start:chunk_start + SharePointConstants.GRAPH_BATCH_LIMIT]
+            batch_requests = []
+            for idx, kwargs in enumerate(chunk):
+                batch_request = {
+                    "id": str(chunk_start + idx),
+                    "method": kwargs["method"],
+                    "url": kwargs["url"],
+                    "headers": kwargs["headers"]
+                }
+                if "body" in kwargs:
+                    batch_request["body"] = kwargs["body"]
+                batch_requests.append(batch_request)
 
-        headers = {
-            "Content-Type": "multipart/mixed;boundary=\"batch_{}\"".format(batch_id),
-            "Accept": "multipart/mixed"
-        }
-        url = "{}/{}/_api/$batch".format(self.sharepoint_origin, self.sharepoint_site)
-        body_elements = []
-        body_elements.append("--batch_{}".format(batch_id))
-        body_elements.append("Content-Type: multipart/mixed; boundary=changeset_{}".format(change_set_id))
-        body_elements.append("")
+            batch_body = {"requests": batch_requests}
+            successful_post = False
+            attempt_number = 0
+            response = None
+            while not successful_post and attempt_number <= SharePointConstants.MAX_RETRIES:
+                try:
+                    attempt_number += 1
+                    logger.info("Posting batch of {} items (chunk starting at {})".format(len(chunk), chunk_start))
+                    response = self.session.post(
+                        SharePointConstants.GRAPH_BATCH_URL,
+                        dku_rs_off=True,
+                        json=batch_body
+                    )
+                    logger.info("Batch post status: {}".format(response.status_code))
+                    if response.status_code >= 400:
+                        logger.error("Response={}".format(response.content))
+                    successful_post = True
+                except requests.exceptions.Timeout as err:
+                    logger.error("Timeout error:{}".format(err))
+                    raise SharePointClientError("Timeout error: {}".format(err))
+                except Exception as err:
+                    logger.warning("ERROR:{}".format(err))
+                    logger.warning("on attempt #{}".format(attempt_number))
+                    if attempt_number == SharePointConstants.MAX_RETRIES:
+                        raise SharePointClientError("Error in batch processing on attempt #{}: {}".format(attempt_number, err))
+                    time.sleep(SharePointConstants.WAIT_TIME_BEFORE_RETRY_SEC)
 
-        for kwargs in kwargs_array:
-            body_elements.append("--changeset_{}".format(change_set_id))
-            body_elements.append("Content-Type: application/http")
-            body_elements.append("Content-Transfer-Encoding: binary")
-            body_elements.append("")
-            body_elements.append("{} {} HTTP/1.1".format(kwargs["verb"].upper(), kwargs["url"]))
-            for header in kwargs["headers"]:
-                body_elements.append("{}: {}".format(header, kwargs["headers"][header]))
-            body_elements.append("Accept-Charset: UTF-8")
-            body_elements.append("")
-            body_elements.append(json.dumps(kwargs["json"]))
-        body_elements.append("--changeset_{}--".format(change_set_id))
-        body_elements.append('--batch_{}--'.format(batch_id))
-        body = "\r\n".join(body_elements)
-        successful_post = False
-        attempt_number = 0
-        while not successful_post and attempt_number <= SharePointConstants.MAX_RETRIES:
-            try:
-                attempt_number += 1
-                logger.info("Posting batch of {} items".format(len(kwargs_array)))
-                response = self.session.post(
-                    url,
-                    dku_rs_off=True,
-                    headers=headers,
-                    data=body.encode('utf-8')
-                )
-                logger.info("Batch post status: {}".format(response.status_code))
-                if response.status_code >= 400:
-                    logger.error("Responnse={}".format(response.content))
-                successful_post = True
-            except requests.exceptions.Timeout as err:
-                #  Necessary to raise since timed out items may or may not be uploaded
-                #  possibly resulting in duplicated items
-                logger.error("Timeout error:{}".format(err))
-                raise SharePointClientError("Timeout error: {}".format(err))
-            except Exception as err:
-                logger.warning("ERROR:{}".format(err))
-                logger.warning("on attempt #{}".format(attempt_number))
-                if attempt_number == SharePointConstants.MAX_RETRIES:
-                    raise SharePointClientError("Error in batch processing on attempt #{}: {}".format(attempt_number, err))
-                time.sleep(SharePointConstants.WAIT_TIME_BEFORE_RETRY_SEC)
+            if response is not None:
+                self._log_batch_errors(response)
+                all_responses.append(response)
 
-        self.log_batch_errors(response, kwargs_array)
+        return all_responses[-1] if all_responses else None
 
-        return response
-
-    def log_batch_errors(self, response, kwargs_array):
+    def _log_batch_errors(self, response):
         logger.info("Batch error analysis")
-        statuses = re.findall('HTTP/1.1 (.*?) ', str(response.content))
-        dump_response_content = False
-        for status, kwarg in zip(statuses, kwargs_array):
-            if not status.startswith("20"):
-                if dump_response_content:
-                    logger.warning("Error {}".format(status))
-                else:
-                    logger.warning("Error {} with kwargs={}".format(status, logger.filter_secrets(kwarg)))
-                dump_response_content = True
-        json_chains = re.findall('\r\n\r\n{"d":(.*?)}\r\n--batchresponse_', str(response.content))
-        for json_chain in json_chains:
-            errors = re.findall('"ErrorCode":(.*?),"', json_chain)
-            for error in errors:
-                if error != "0":
-                    dump_response_content = True
-        error_messages = re.findall('"ErrorMessage":"(.*?)}', str(response.content))
-        for error_message in error_messages:
-            logger.warning("Error:'{}'".format(error_message))
-        if dump_response_content:
-            if self.number_dumped_logs == 0:
-                logger.warning("response.content={}".format(response.content))
-            else:
-                logger.warning("Batch error analysis KO ({})".format(self.number_dumped_logs))    
-            self.number_dumped_logs += 1
-        else:
-            logger.info("Batch error analysis OK")
-
-    def get_base_url(self):
-        return "{}/{}/_api/Web".format(
-            self.sharepoint_origin, self.sharepoint_site
-        )
-
-    def get_lists_url(self):
-        return self.get_base_url() + "/lists"
-
-    def get_lists_by_title_url(self, list_title):
-        # Sharepoint's API escapes single quotes in titles by doubling them. "McDonald's" -> 'McDonald''s'
-        # https://sharepoint.stackexchange.com/questions/246685/sharepoint-rest-api-update-metadata-document-library-item-when-value-string-in
-        escaped_list_title = self.escape_path(list_title)
-        return self.get_lists_url() + "/GetByTitle('{}')".format(urllib.parse.quote(escaped_list_title))
-
-    def get_lists_by_id_url(self, list_id):
-        return self.get_lists_url() + "('{}')".format(list_id)
-
-    def get_list_items_url(self, list_title):
-        return self.get_lists_by_title_url(list_title) + "/Items"
-
-    def get_list_data_as_stream(self, list_title):
-        return self.get_lists_by_title_url(list_title) + "/RenderListDataAsStream"
-
-    def get_list_items_url_by_id(self, list_id):
-        return self.get_lists_by_id_url(list_id) + "/Items"
-
-    def get_list_views_url(self, list_title):
-        return self.get_lists_by_title_url(list_title) + "/Views"
-
-    def get_list_add_item_using_path_url(self, list_title):
-        # https://ikuiku.sharepoint.com/sites/dssplugin/_api/web/GetList(@a1)/AddValidateUpdateItemUsingPath()?@a1=%27%2Fsites%2Fdssplugin%2FLists%2FTypeLocation%27
-        return self.get_base_url() + "/GetList(@a1)/AddValidateUpdateItemUsingPath()?@a1='/{}/Lists/{}'".format(
-            self.sharepoint_site,
-            self.escape_path(list_title)
-        )
-
-    def get_list_fields_url(self, list_title):
-        return self.get_lists_by_title_url(list_title) + "/fields"
-
-    def get_lists_add_field_url(self, list_title):
-        return self.get_base_url() + "/GetList(@a1)/Fields/CreateFieldAsXml?@a1='/{}/Lists/{}'".format(
-            self.sharepoint_site,
-            self.escape_path(list_title)
-        )
-
-    def get_guid_lists_add_field_url(self, list_id):
-        return self.get_base_url() + "/lists('{}')/Fields/CreateFieldAsXml".format(
-            list_id
-        )
-
-    def get_folder_url(self, full_path=None):
-        if full_path:
-            if full_path == '/':
-                full_path = ""
-            return self.get_base_url() + "/GetFolderByServerRelativePath(decodedurl='{}')".format(
-                url_encode(self.get_site_path(full_path))
-            )
-        else:
-            return self.get_base_url() + "/GetFolderByServerRelativePath(decodedurl=@a1)"
-
-    def get_file_url(self, full_path=None):
-        if full_path:
-            return self.get_base_url() + "/GetFileByServerRelativePath(decodedurl='{}')".format(
-                url_encode(self.get_site_path(full_path))
-            )
-        else:
-            return self.get_base_url() + "/GetFileByServerRelativePath(decodedurl=@a1)"
-
-    def get_file_content_url(self, full_path):
-        return self.get_file_url() + "/$value{}".format(
-            self.get_path_as_query_string(full_path)
-        )
-
-    def get_move_url(self, from_path, to_path):
-        # Using the new method leads to 403.
-        # Old method left in place. As a result, moving/renaming a file containing % in its path/name is still not possible.
-        # return self.get_file_url(from_path) + "/movetousingpath(newPath='{}',moveOperations=1)".format(
-        return self.get_file_url() + "/moveto(newurl=@a2,flags=1)?@a1='{}'&@a2='{}'".format(
-            url_encode(self.get_site_path(from_path)),
-            url_encode(self.get_site_path(to_path))
-        )
-
-    def get_recycle_file_url(self, full_path):
-        return self.get_file_url() + "/recycle(){}".format(
-            self.get_path_as_query_string(full_path)
-        )
-
-    def get_recycle_folder_url(self, full_path):
-        return self.get_folder_url() + "/recycle(){}".format(
-            self.get_path_as_query_string(full_path)
-        )
-
-    def get_file_check_in_url(self, full_path):
-        return self.get_file_url() + "/CheckIn(){}".format(
-            self.get_path_as_query_string(full_path)
-        )
-
-    def get_file_check_out_url(self, full_path):
-        return self.get_file_url() + "/CheckOut(){}".format(
-            self.get_path_as_query_string(full_path)
-        )
-
-    def get_site_path(self, full_path):
-        return "/{}/{}{}".format(
-            self.escape_path(self.sharepoint_site),
-            self.escape_path(self.sharepoint_root),
-            self.escape_path(full_path)
-        ).replace("//", "/")
-
-    def get_add_folder_url(self, full_path):
-        return self.get_base_url() + "/Folders/AddUsingPath(decodedurl=@a1){}".format(
-            self.get_path_as_query_string(full_path)
-        )
-
-    def get_file_add_url(self, full_path, file_name):
-        return self.get_folder_url() + "/Files/AddUsingPath(decodedurl='{}',overwrite=true){}".format(
-            url_encode(
-                self.escape_path(file_name)
-            ),
-            self.get_path_as_query_string(full_path)
-        )
-
-    def get_list_default_view_url(self, list_title):
-        return os.path.join(
-            self.get_lists_by_title_url(list_title),
-            SharePointConstants.DEFAULT_VIEW_ENDPOINT
-        )
-
-    def get_path_as_query_string(self, path):
-        if path:
-            if path == '/':
-                path = ""
-        return "?@a1='{}'".format(
-            url_encode(self.get_site_path(path))
-        )
-
-    @staticmethod
-    def assert_login_details(required_keys, login_details):
-        if login_details is None or login_details == {}:
-            raise SharePointClientError("Login details are empty")
-        for key in required_keys:
-            if key not in login_details.keys():
-                raise SharePointClientError(required_keys[key])
-
-    def assert_response_ok(self, response, no_json=False, calling_method=""):
-        status_code = response.status_code
-        if status_code >= 400:
-            logger.error("Error {} in method {}".format(status_code, calling_method))
-            logger.error("when calling {}".format(response.url))
-            logger.error("dump={}".format(response.content))
-            enriched_error_message = self.get_enriched_error_message(response)
-            if enriched_error_message is not None:
-                raise SharePointClientError("Error {} ({}): {}".format(status_code, calling_method, enriched_error_message))
-            if status_code == 400:
-                raise SharePointClientError("({}){}".format(calling_method, response.text))
-            if status_code == 404:
-                raise SharePointClientError("Not found. Please check tenant, site type or site name. ({})".format(calling_method))
-            if status_code == 403:
-                logger.error("403 error. Checking for federated namespace.")
-                self.assert_non_federated_namespace()
-                logger.error("User does not belong to federated namespace.")
-                raise SharePointClientError("403 Forbidden. Please check your account credentials. ({})".format(calling_method))
-            raise SharePointClientError("Error {} ({})".format(status_code, calling_method))
-        if not no_json:
-            self.assert_no_error_in_json(response, calling_method=calling_method)
-
-    def assert_non_federated_namespace(self):
-        # Called following 403 error
-        if self.username_for_namespace_diag:
-            # username / password login was used to login
-            # we check if the email used as username belongs to a federated namespace
-            json_response = ""
-            try:
-                response = self.session.get(
-                    "https://login.microsoftonline.com/GetUserRealm.srf",
-                    params={
-                        "login": "{}".format(self.username_for_namespace_diag)
-                    }
-                )
-                json_response = response.json()
-            except Exception as err:
-                logger.info("Error while testing for federated namespace: {}".format(err))
-            if json_response.get("NameSpaceType", "").lower() == "federated":
-                logger.error("User email address belongs to a federated namespace.")
-                raise SharePointClientError(
-                    "403 Forbidden. The '{}' account belongs to a federated namespace. ".format(self.username_for_namespace_diag)
-                    + "Dataiku might not be able to use it to access SharePoint-Online. "
-                    + "Please contact your administrator to configure a Single Sign On or an App token access."
-                )
-
-    @staticmethod
-    def get_enriched_error_message(response):
         try:
             json_response = response.json()
-            error_message = get_value_from_paths(
-                json_response,
-                [
-                    ["error", "message", "value"],
-                    ["error_description"],
-                    ["error", "message"],
-                    ["odata.error", "message", "value"]
-                ]
-            )
-            if error_message:
-                return "{}".format(error_message)
-        except Exception as error:
-            logger.info("Error trying to extract error message: {}".format(error))
-            logger.info("Response.content={}".format(response.content))
-            return None
-        return None
-
-    @staticmethod
-    def assert_no_error_in_json(response, calling_method=""):
-        if len(response.content) == 0:
-            raise SharePointClientError("Empty response from SharePoint ({}). Please check user credentials.".format(calling_method))
-        json_response = response.json()
-        if "error" in json_response:
-            if "message" in json_response["error"] and "value" in json_response["error"]["message"]:
-                raise SharePointClientError("Error ({}): {}".format(calling_method, json_response["error"]["message"]["value"]))
+            responses = json_response.get("responses", [])
+            has_errors = False
+            for resp in responses:
+                status = resp.get("status", 0)
+                if status >= 400:
+                    has_errors = True
+                    body = resp.get("body", {})
+                    error = body.get("error", {})
+                    logger.warning("Batch item {} error {}: {}".format(
+                        resp.get("id"), status, error.get("message", "Unknown error")))
+            if has_errors:
+                if self.number_dumped_logs == 0:
+                    logger.warning("response.content={}".format(response.content))
+                else:
+                    logger.warning("Batch error analysis KO ({})".format(self.number_dumped_logs))
+                self.number_dumped_logs += 1
             else:
-                raise SharePointClientError("Error ({}): {}".format(calling_method, json_response))
+                logger.info("Batch error analysis OK")
+        except Exception as err:
+            logger.warning("Error parsing batch response: {}".format(err))
 
-    def get_site_app_access_token(self):
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded"
-        }
-        data = {
-            "grant_type": "client_credentials",
-            "client_id": "{client_id}@{tenant_id}".format(client_id=self.client_id, tenant_id=self.tenant_id),
-            "client_secret": self.client_secret,
-            "resource": "{resource}/{sharepoint_url}@{tenant_id}".format(
-                resource=SharePointConstants.SHAREPOINT_ONLINE_RESSOURCE,
-                sharepoint_url=self.sharepoint_url,
-                tenant_id=self.tenant_id
-            )
-        }
-        response = requests.post(
-            SharePointConstants.GET_SITE_APP_TOKEN_URL.format(tenant_id=self.tenant_id),
-            headers=headers,
-            data=data,
-            timeout=SharePointConstants.TIMEOUT_SEC
-        )
-        self.assert_response_ok(response, calling_method="get_site_app_access_token")
-        json_response = response.json()
-        return json_response.get("access_token")
 
-    def get_certificate_app_access_token(self):
-        import msal
+    # ---- Authentication methods ----
+
+    def _get_site_app_access_token(self):
         app = msal.ConfidentialClientApplication(
             self.client_id,
-            authority=f"https://login.microsoftonline.com/{self.tenant_id}",
+            authority="https://login.microsoftonline.com/{}".format(self.tenant_id),
+            client_credential=self.client_secret,
+        )
+        result = app.acquire_token_for_client(scopes=[SharePointConstants.GRAPH_API_DEFAULT_SCOPE])
+        access_token = result.get("access_token")
+        if not access_token:
+            error_description = result.get("error_description", "Unknown error")
+            raise SharePointClientError("Failed to acquire token for site app: {}".format(error_description))
+        return access_token
+
+    def _get_certificate_app_access_token(self):
+        app = msal.ConfidentialClientApplication(
+            self.client_id,
+            authority="https://login.microsoftonline.com/{}".format(self.tenant_id),
             client_credential={
                 "thumbprint": self.client_certificate_thumbprint,
                 "private_key": self.client_certificate,
                 "passphrase": self.passphrase,
             },
         )
-        json_response = app.acquire_token_for_client(scopes=[f"{self.sharepoint_origin}/.default"])
-        return json_response.get("access_token")
+        result = app.acquire_token_for_client(scopes=[SharePointConstants.GRAPH_API_DEFAULT_SCOPE])
+        access_token = result.get("access_token")
+        if not access_token:
+            error_description = result.get("error_description", "Unknown error")
+            raise SharePointClientError("Failed to acquire token for certificate app: {}".format(error_description))
+        return access_token
 
-    def get_username_password_access_token(self, username, password):
-        import msal
+    def _get_username_password_access_token(self, username, password):
         authority_url = 'https://login.microsoftonline.com/{}'.format(self.tenant_id)
         app = msal.PublicClientApplication(
             authority=authority_url,
@@ -993,46 +726,18 @@ class SharePointClient():
             client_credential=None
         )
         result = app.acquire_token_by_username_password(
-            '{}'.format(username),
-            '{}'.format(password),
-            scopes=["https://{}.sharepoint.com/.default".format(self.sharepoint_tenant)]
+            username,
+            password,
+            scopes=[SharePointConstants.GRAPH_API_DEFAULT_SCOPE]
         )
         access_token = result.get("access_token")
         error_description = result.get("error_description")
         if error_description:
             logger.error("Dumping: {}".format(result))
-            raise Exception("Error: {}".format(error_description))
+            raise SharePointClientError("Error: {}".format(error_description))
         return access_token
 
-    def get_view_id(self, list_title, view_title):
-        if not list_title:
-            return None
-        views = self.get_list_views(list_title)
-        for view in views:
-            if view.get("Title") == view_title:
-                return view.get("Id")
-        raise ValueError("View '{}' does not exist in list '{}'.".format(view_title, list_title))
-
-    def get_list_views(self, list_title):
-        response = self.session.get(
-            self.get_list_views_url(list_title),
-            params={
-                "$select": "ID,ServerRelativeUrl,Title"
-            }
-        )
-        self.assert_response_ok(response, calling_method="get_list_views_ids")
-        json_response = response.json()
-        views = get_value_from_path(json_response, [SharePointConstants.RESULTS_CONTAINER_V2, "results"])
-        logger.info("get_list_views:available views:{}".format(views))
-        return views
-
-    @staticmethod
-    def get_random_guid():
-        return str(uuid.uuid4())
-
-    @staticmethod
-    def escape_path(path):
-        return path.replace("'", "''")
+    # ---- Schema / read operations ----
 
     def get_writer(self, dataset_schema, dataset_partitioning,
                    partition_id, max_workers, batch_size, write_mode):
@@ -1091,114 +796,118 @@ class SharePointClient():
         }
 
     def is_column_displayable(self, column, display_metadata=False, metadata_to_retrieve=[]):
-        if display_metadata and (column['StaticName'] in metadata_to_retrieve):
+        if display_metadata and (column[SharePointConstants.STATIC_NAME] in metadata_to_retrieve):
             return True
         return (not column[SharePointConstants.HIDDEN_COLUMN])
 
-
-class SharePointSession():
-
-    def __init__(self, sharepoint_user_name, sharepoint_password, sharepoint_url, sharepoint_site, sharepoint_access_token=None, max_retry=10):
-        self.sharepoint_url = sharepoint_url
-        self.sharepoint_site = sharepoint_site
-        self.sharepoint_access_token = sharepoint_access_token
-        requests.adapters.DEFAULT_RETRIES = max_retry
-        self.form_digest_value = get_form_digest_value(sharepoint_url, sharepoint_site, sharepoint_access_token=self.sharepoint_access_token)
-
-    def get(self, url, headers=None, params=None):
-        retries_limit = ItemsLimit(SharePointConstants.MAX_RETRIES)
-        headers = headers or {}
-        headers["Accept"] = DSSConstants.APPLICATION_JSON
-        headers["Authorization"] = self.get_authorization_bearer()
-        response = None
-        while not is_request_performed(response) and not retries_limit.is_reached():
-            response = requests.get(url, headers=headers, params=params, timeout=SharePointConstants.TIMEOUT_SEC)
-        return response
-
-    def post(self, url, headers=None, json=None, data=None, params=None):
-        retries_limit = ItemsLimit(SharePointConstants.MAX_RETRIES)
-        headers = headers or {}
-        default_headers = {
-           "Accept": DSSConstants.APPLICATION_JSON_NOMETADATA,
-           "Content-Type": DSSConstants.APPLICATION_JSON_NOMETADATA,
-           "Authorization": self.get_authorization_bearer()
-        }
-        if self.form_digest_value:
-            default_headers.update({"X-RequestDigest": self.form_digest_value})
-        default_headers.update(headers)
-        response = None
-        while not is_request_performed(response) and not retries_limit.is_reached():
-            response = requests.post(url, headers=default_headers, json=json, data=data, params=params, timeout=SharePointConstants.TIMEOUT_SEC)
-        return response
-
-    def request(self, method, url, headers=None, json=None, data=None, params=None):
-        retries_limit = ItemsLimit(SharePointConstants.MAX_RETRIES)
-        headers = headers or {}
-        default_headers = {
-           "Accept": DSSConstants.APPLICATION_JSON_NOMETADATA,
-           "Content-Type": DSSConstants.APPLICATION_JSON_NOMETADATA,
-           "Authorization": self.get_authorization_bearer()
-        }
-        if self.form_digest_value:
-            default_headers.update({"X-RequestDigest": self.form_digest_value})
-        default_headers.update(headers)
-        response = None
-        while not is_request_performed(response) and not retries_limit.is_reached():
-            response = requests.request(method, url, headers=default_headers, json=json, data=data, params=params, timeout=SharePointConstants.TIMEOUT_SEC)
-        return response
+    # ---- Error handling ----
 
     @staticmethod
-    def close():
-        logger.info("Closing SharePointSession.")
+    def assert_login_details(required_keys, login_details):
+        if login_details is None or login_details == {}:
+            raise SharePointClientError("Login details are empty")
+        for key in required_keys:
+            if key not in login_details.keys():
+                raise SharePointClientError(required_keys[key])
 
-    def get_authorization_bearer(self):
-        return "Bearer {}".format(self.sharepoint_access_token)
+    def assert_response_ok(self, response, no_json=False, calling_method=""):
+        status_code = response.status_code
+        if status_code >= 400:
+            logger.error("Error {} in method {}".format(status_code, calling_method))
+            logger.error("when calling {}".format(response.url))
+            logger.error("dump={}".format(response.content))
+            enriched_error_message = self.get_enriched_error_message(response)
+            if enriched_error_message is not None:
+                raise SharePointClientError("Error {} ({}): {}".format(status_code, calling_method, enriched_error_message))
+            if status_code == 400:
+                raise SharePointClientError("({}){}".format(calling_method, response.text))
+            if status_code == 404:
+                raise SharePointClientError("Not found. Please check tenant, site type or site name. ({})".format(calling_method))
+            if status_code == 403:
+                raise SharePointClientError("403 Forbidden. Please check your account credentials and API permissions. ({})".format(calling_method))
+            raise SharePointClientError("Error {} ({})".format(status_code, calling_method))
+        if not no_json:
+            self.assert_no_error_in_json(response, calling_method=calling_method)
 
-
-def get_form_digest_value(sharepoint_url, sharepoint_site, session=None, sharepoint_access_token=None):
-    def get_contextinfo_url():
-        return "https://{}/{}/_api/contextinfo".format(
-            sharepoint_url, sharepoint_site
-        )
-
-    logger.info("Getting form digest value")
-    if session is None:
-        session = RobustSession(session=requests, status_codes_to_retry=[429, 500, 503])
-        session.update_settings(
-            max_retries=SharePointConstants.MAX_RETRIES,
-            base_retry_timer_sec=SharePointConstants.WAIT_TIME_BEFORE_RETRY_SEC
-        )
-    form_digest_value = None
-    try:
-        if sharepoint_access_token:
-            headers = {**DSSConstants.JSON_HEADERS, **{"Authorization": "Bearer {}".format(sharepoint_access_token)}}
-            response = session.post(
-                url=get_contextinfo_url(),
-                headers=headers,
-                timeout=SharePointConstants.TIMEOUT_SEC,
+    @staticmethod
+    def get_enriched_error_message(response):
+        try:
+            json_response = response.json()
+            error_message = get_value_from_paths(
+                json_response,
+                [
+                    ["error", "message"],
+                    ["error_description"],
+                    ["error", "message", "value"],
+                    ["odata.error", "message", "value"]
+                ]
             )
-        else:
-            response = session.post(
-                url=get_contextinfo_url(),
-                timeout=SharePointConstants.TIMEOUT_SEC,
-            )
+            if error_message:
+                return "{}".format(error_message)
+        except Exception as error:
+            logger.info("Error trying to extract error message: {}".format(error))
+            logger.info("Response.content={}".format(response.content))
+            return None
+        return None
 
-        form_digest_value = get_value_from_path(
-            response.json(),
-            [
-                SharePointConstants.RESULTS_CONTAINER_V2,
-                SharePointConstants.GET_CONTEXT_WEB_INFORMATION,
-                SharePointConstants.FORM_DIGEST_VALUE
-            ]
-        )
-    except Exception as error:
-        logger.warning("Issue while retrieving form digest value ({})".format(error))
-    logger.info("Form digest value {}".format(form_digest_value))
-    return form_digest_value
+    @staticmethod
+    def assert_no_error_in_json(response, calling_method=""):
+        if len(response.content) == 0:
+            raise SharePointClientError("Empty response from SharePoint ({}). Please check user credentials.".format(calling_method))
+        json_response = response.json()
+        if "error" in json_response:
+            error = json_response["error"]
+            message = error.get("message", str(error))
+            raise SharePointClientError("Error ({}): {}".format(calling_method, message))
+
+    @staticmethod
+    def get_random_guid():
+        return str(uuid.uuid4())
+
+    @staticmethod
+    def escape_path(path):
+        return path.replace("'", "''")
+
+
+class GraphSession():
+    """HTTP session wrapper that adds Bearer token auth for Microsoft Graph API."""
+
+    def __init__(self, access_token):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Authorization": "Bearer {}".format(access_token),
+            "Accept": "application/json",
+        })
+
+    def get(self, url, **kwargs):
+        kwargs.setdefault("timeout", SharePointConstants.TIMEOUT_SEC)
+        return self.session.get(url, **kwargs)
+
+    def post(self, url, **kwargs):
+        kwargs.setdefault("timeout", SharePointConstants.TIMEOUT_SEC)
+        return self.session.post(url, **kwargs)
+
+    def put(self, url, **kwargs):
+        kwargs.setdefault("timeout", SharePointConstants.TIMEOUT_SEC)
+        return self.session.put(url, **kwargs)
+
+    def patch(self, url, **kwargs):
+        kwargs.setdefault("timeout", SharePointConstants.TIMEOUT_SEC)
+        return self.session.patch(url, **kwargs)
+
+    def delete(self, url, **kwargs):
+        kwargs.setdefault("timeout", SharePointConstants.TIMEOUT_SEC)
+        return self.session.delete(url, **kwargs)
+
+    def request(self, method, url, **kwargs):
+        kwargs.setdefault("timeout", SharePointConstants.TIMEOUT_SEC)
+        return self.session.request(method, url, **kwargs)
+
+    def close(self):
+        logger.info("Closing GraphSession.")
+        self.session.close()
 
 
 class SuppressFilter(logging.Filter):
-    # Avoid poluting logs with redondant warnings
-    # https://github.com/diyan/pywinrm/issues/269
     def filter(self, record):
         return 'Failed to parse headers' not in record.getMessage()

@@ -1,47 +1,47 @@
 class SharePointConstants(object):
+    # Certificate key markers
     CLEAR_KEY_END = "-----END PRIVATE KEY-----"
     CLEAR_KEY_START = "-----BEGIN PRIVATE KEY-----"
+    ENCRYPTED_KEY_END = "-----END ENCRYPTED PRIVATE KEY-----"
+    ENCRYPTED_KEY_START = "-----BEGIN ENCRYPTED PRIVATE KEY-----"
+
+    # Column/schema constants
     COLUMNS = 'columns'
     COLUMN_TITLE = 'Title'
     COMMENT_COLUMN = 'comment'
-    DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
-    DEFAULT_VIEW_ENDPOINT = "DefaultView/ViewFields"
-    DEFAULT_WAIT_BEFORE_RETRY = 60
-    ENCRYPTED_KEY_END = "-----END ENCRYPTED PRIVATE KEY-----"
-    ENCRYPTED_KEY_START = "-----BEGIN ENCRYPTED PRIVATE KEY-----"
     ENTITY_PROPERTY_NAME = 'EntityPropertyName'
-    ERROR_CONTAINER = 'error'
-    EXPENDABLES_FIELDS = {"Author": "Title", "Editor": "Title"}
-    FALLBACK_TYPE = "Text"
-    FILE = 0
-    FILE_SYSTEM_OBJECT_TYPE = "FileSystemObjectType"
-    FILE_UPLOAD_CHUNK_SIZE = 131072000
-    FORBIDDEN_PATH_CHARS = ['"', '*', ':', '<', '>', '?', '\\', '|']
-    FORM_DIGEST_VALUE = "FormDigestValue"
-    GET_CONTEXT_WEB_INFORMATION = "GetContextWebInformation"
-    GET_FOLDER_URL_STRUCTURE = "{0}/{1}/_api/Web/GetFolderByServerRelativeUrl('/{1}/{2}{3}')"
-    GET_SITE_APP_TOKEN_URL = "https://accounts.accesscontrol.windows.net/{tenant_id}/tokens/OAuth/2"
     HIDDEN_COLUMN = 'Hidden'
     INTERNAL_NAME = 'InternalName'
-    LENGTH = 'Length'
-    LOOKUP_FIELD = 'LookupField'
-    MAX_FILE_SIZE_CONTINUOUS_UPLOAD = 262144000
-    MAX_RETRIES = 5
-    MESSAGE = 'message'
-    MOVE_TO = "MoveTo"
-    NAME = 'Name'
     NAME_COLUMN = 'name'
-    NEXT_PAGE = '__next'
     READ_ONLY_FIELD = 'ReadOnlyField'
-    RENDER_OPTIONS = 5707271
-    RESULTS = 'results'
-    RESULTS_CONTAINER_V2 = 'd'
-    SHAREPOINT_ONLINE_RESSOURCE = "00000003-0000-0ff1-ce00-000000000000"
     STATIC_NAME = 'StaticName'
-    TIME_LAST_MODIFIED = 'TimeLastModified'
     TITLE_COLUMN = 'Title'
+    TYPE_AS_STRING = 'TypeAsString'
+    TYPE_COLUMN = 'type'
+    TYPE_NOTE = 'Note'
+    VALUE = 'value'
+    FALLBACK_TYPE = "Text"
+
+    # DriveItem property names (Graph API format)
+    NAME = 'name'
+    LENGTH = 'size'
+    TIME_LAST_MODIFIED = 'lastModifiedDateTime'
+
+    # Date formats
+    DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
     TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-    TIMEOUT_SEC = 300
+
+    # Error/response keys
+    ERROR_CONTAINER = 'error'
+    MESSAGE = 'message'
+
+    # File/folder constants
+    FORBIDDEN_PATH_CHARS = ['"', '*', ':', '<', '>', '?', '\\', '|']
+
+    # Expendable lookup fields
+    EXPENDABLES_FIELDS = {"Author": "Title", "Editor": "Title"}
+
+    # SharePoint type mappings (SharePoint type -> DSS type)
     TYPES = {
         "Text": "string",
         "Number": "string",
@@ -53,11 +53,54 @@ class SharePointConstants(object):
         "Attachments": None,
         "Calculated": "string",
         "User": "array",
-        "Thumbnail": "object"
+        "Thumbnail": "object",
+        "Note": "string"
     }
-    TYPE_AS_STRING = 'TypeAsString'
-    TYPE_COLUMN = 'type'
-    TYPE_NOTE = 'Note'
-    VALUE = 'value'
+
+    # Write mode
     WRITE_MODE_CREATE = "create"
+
+    # Retry / timeout
+    DEFAULT_WAIT_BEFORE_RETRY = 60
+    MAX_RETRIES = 5
     WAIT_TIME_BEFORE_RETRY_SEC = 2
+    TIMEOUT_SEC = 300
+
+    # --- Microsoft Graph API constants ---
+
+    GRAPH_API_BASE_URL = "https://graph.microsoft.com/v1.0"
+    GRAPH_API_DEFAULT_SCOPE = "https://graph.microsoft.com/.default"
+
+    # Graph batch settings
+    GRAPH_BATCH_URL = "https://graph.microsoft.com/v1.0/$batch"
+    GRAPH_BATCH_LIMIT = 20
+
+    # Graph upload thresholds
+    GRAPH_MAX_SIMPLE_UPLOAD_SIZE = 4 * 1024 * 1024        # 4MB
+    GRAPH_UPLOAD_CHUNK_SIZE = 10 * 320 * 1024              # 3.2MB (must be 320KB multiple)
+
+    # Graph column type map: SP field type -> Graph columnDefinition typed property
+    GRAPH_COLUMN_TYPE_MAP = {
+        "Text": {"text": {"allowMultipleLines": False, "maxLength": 255}},
+        "Note": {"text": {"allowMultipleLines": True}},
+        "Number": {"number": {}},
+        "Integer": {"number": {"decimalPlaces": "none"}},
+        "DateTime": {"dateTime": {}},
+        "Boolean": {"boolean": {}},
+        "URL": {"hyperlinkOrPicture": {}},
+    }
+
+    # Reverse map: Graph column type key -> SP TypeAsString
+    GRAPH_TO_SP_TYPE_MAP = {
+        "text": "Text",
+        "number": "Number",
+        "dateTime": "DateTime",
+        "boolean": "Boolean",
+        "hyperlinkOrPicture": "URL",
+        "calculated": "Calculated",
+        "lookup": "User",
+        "thumbnail": "Thumbnail",
+        "personOrGroup": "User",
+        "choice": "Text",
+        "currency": "Number",
+    }
