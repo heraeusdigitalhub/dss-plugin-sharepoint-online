@@ -198,7 +198,7 @@ class SharePointClient():
         logger.info("Resolved site_id={}".format(self.site_id))
 
     def _resolve_drive_id(self):
-        root_parts = self.sharepoint_root.split("/", 1) if self.sharepoint_root else [""]
+        root_parts = self.sharepoint_root.split("/", 1) if self.sharepoint_root else self.config.get("path", "").strip("/").split("/", 1)
         root_library_name = root_parts[0]
         remaining_path = root_parts[1] if len(root_parts) > 1 else ""
 
@@ -222,13 +222,8 @@ class SharePointClient():
                 logger.info("Resolved drive_id={} (by webUrl '{}'), path_prefix={}".format(self.drive_id, web_url, self._drive_path_prefix))
                 return
 
-        # No match: fall back to default drive, use full sharepoint_root as path prefix
-        default_url = "{}/sites/{}/drive".format(SharePointConstants.GRAPH_API_BASE_URL, self.site_id)
-        default_response = self.session.get(default_url)
-        self.assert_response_ok(default_response, calling_method="_resolve_drive_id:default")
-        self.drive_id = default_response.json()["id"]
-        self._drive_path_prefix = self.sharepoint_root
-        logger.info("Resolved drive_id={} (default), path_prefix={}".format(self.drive_id, self._drive_path_prefix))
+        # No match: raise to be explicit about missing root path
+        raise SharePointClientError("Drive with root path '{}' not found".format(root_library_name))
 
     def _resolve_list_id(self, list_title):
         if list_title in self._list_id_cache:
