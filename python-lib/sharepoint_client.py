@@ -215,10 +215,11 @@ class SharePointClient():
                 logger.info("Resolved drive_id={} (by name), path_prefix={}".format(self.drive_id, self._drive_path_prefix))
                 return
             web_url = drive.get("webUrl", "")
-            if web_url.endswith("/" + root_library_name):
+            decoded_web_url = urllib.parse.unquote(web_url)
+            if decoded_web_url.lower().endswith("/" + root_library_name.lower()):
                 self.drive_id = drive["id"]
                 self._drive_path_prefix = remaining_path
-                logger.info("Resolved drive_id={} (by webUrl), path_prefix={}".format(self.drive_id, self._drive_path_prefix))
+                logger.info("Resolved drive_id={} (by webUrl '{}'), path_prefix={}".format(self.drive_id, web_url, self._drive_path_prefix))
                 return
 
         # No match: fall back to default drive, use full sharepoint_root as path prefix
@@ -278,7 +279,7 @@ class SharePointClient():
 
     # ---- File/folder operations ----
 
-    def _get_all_children(self, path):
+    def _get_children(self, path):
         url = self._get_drive_item_url(path, suffix="/children")
         all_items = []
         while url:
@@ -291,23 +292,23 @@ class SharePointClient():
             url = json_response.get("@odata.nextLink")
         return all_items
 
-    def get_folders(self, path):
-        items = self._get_all_children(path)
-        folders = [item for item in items if "folder" in item]
-        return {"items": folders}
-
-    def get_files(self, path):
-        items = self._get_all_children(path)
-        files = [item for item in items if "file" in item]
-        return {"items": files}
-
-    def is_file(self, path):
+    def list_folder_items(self, path):
+        files = []
+        folders = []
+        for i in self._get_children(path):
+            if "file" in i:
+                files.append(i)
+            elif "folder" in i:
+                folders.append(i)
+        return files, folders
+    
+    def get_item(self, path):
         url = self._get_drive_item_url(path)
         response = self.session.get(url)
         if response.status_code == 404:
             return False
         self.assert_response_ok(response, calling_method="is_file")
-        return "file" in response.json()
+        return response.json()
 
     def get_file_content(self, full_path):
         url = self._get_drive_item_url(full_path, suffix="/content")
@@ -316,18 +317,21 @@ class SharePointClient():
         return response
 
     def write_file_content(self, full_path, data):
-        file_size = len(data)
+        data.seek(0, 2)
+        file_size = data.tell()
+        data.seek(0)
         self.check_out_file(full_path)
         if file_size <= SharePointConstants.GRAPH_MAX_SIMPLE_UPLOAD_SIZE:
-            self._write_simple_upload(full_path, data)
+            self._write_simple_upload(full_path, data, file_size)
         else:
             self._write_upload_session(full_path, data, file_size)
+        self.check_in_file(full_path)
 
-    def _write_simple_upload(self, full_path, data):
+    def _write_simple_upload(self, full_path, data, file_size):
         url = self._get_drive_item_url(full_path, suffix="/content")
         headers = {
             "Content-Type": "application/octet-stream",
-            "Content-Length": str(len(data))
+            "Content-Length": str(file_size)
         }
         response = self.session.put(url, headers=headers, data=data)
         self.assert_response_ok(response, calling_method="write_file_content")
@@ -344,8 +348,10 @@ class SharePointClient():
         chunk_size = SharePointConstants.GRAPH_UPLOAD_CHUNK_SIZE
         offset = 0
         while offset < file_size:
-            chunk_end = min(offset + chunk_size, file_size)
-            chunk_data = data[offset:chunk_end]
+            chunk_data = data.read(chunk_size)
+            if not chunk_data:
+                break
+            chunk_end = offset + len(chunk_data)
             content_range = "bytes {}-{}/{}".format(offset, chunk_end - 1, file_size)
             headers = {
                 "Content-Length": str(len(chunk_data)),
@@ -403,6 +409,7 @@ class SharePointClient():
 
         from_parent, _ = os.path.split(full_from_path.rstrip("/"))
         if from_parent != to_parent:
+            self.create_path(full_to_path)
             parent_url = self._get_drive_item_url(to_parent)
             parent_response = self.session.get(parent_url)
             self.assert_response_ok(parent_response, calling_method="move_file:get_parent")
@@ -423,15 +430,10 @@ class SharePointClient():
         url = self._get_drive_item_url(full_path, suffix="/checkout")
         self.session.post(url)
 
-    def recycle_file(self, full_path):
+    def recycle(self, full_path):
         url = self._get_drive_item_url(full_path)
         response = self.session.delete(url)
-        self.assert_response_ok(response, no_json=True, calling_method="recycle_file")
-
-    def recycle_folder(self, full_path):
-        url = self._get_drive_item_url(full_path)
-        response = self.session.delete(url)
-        self.assert_response_ok(response, no_json=True, calling_method="recycle_folder")
+        self.assert_response_ok(response, no_json=True, calling_method="recycle")
 
     # ---- List operations ----
 
@@ -469,29 +471,23 @@ class SharePointClient():
                 return sp_type
         return SharePointConstants.FALLBACK_TYPE
 
-    def get_list_items(self, list_title, params=None):
-        params = params or {}
+    def get_list_items(self, list_title):
         list_id = self._resolve_list_id(list_title)
         url = "{}/items".format(self._get_list_url(list_id))
         graph_params = {
             "$expand": "fields",
-            "$top": "100"
+            "$top": "5000"
         }
-        graph_params.update(params)
-        response = self.session.get(url, params=graph_params)
-        self.assert_response_ok(response, calling_method="get_list_items")
-        json_response = response.json()
-
-        rows = []
-        for item in json_response.get("value", []):
-            fields = item.get("fields", {})
-            rows.append(fields)
-
-        result = {"Row": rows}
-        next_link = json_response.get("@odata.nextLink")
-        if next_link:
-            result["NextHref"] = next_link
-        return result
+        all_rows = []
+        while url:
+            response = self.session.get(url, params=graph_params)
+            self.assert_response_ok(response, calling_method="get_list_items")
+            json_response = response.json()
+            for item in json_response.get("value", []):
+                all_rows.append(item.get("fields", {}))
+            url = json_response.get("@odata.nextLink")
+            graph_params = None  # nextLink already encodes all query params
+        return {"Row": all_rows}
 
     def create_list(self, list_name):
         url = self._get_list_url()
@@ -563,7 +559,7 @@ class SharePointClient():
         if not new_field_type:
             return None
 
-        url = "{}/columns".format(self._get_list_url(list_id))
+        url = "{}/columns?$select=id,name,displayName".format(self._get_list_url(list_id))
         response = self.session.get(url)
         self.assert_response_ok(response, calling_method="update_column_type:get_columns")
         columns = response.json().get("value", [])
@@ -869,43 +865,39 @@ class SharePointClient():
         return path.replace("'", "''")
 
 
-class GraphSession():
+class GraphSession(requests.Session):
     """HTTP session wrapper that adds Bearer token auth for Microsoft Graph API."""
 
     def __init__(self, access_token):
-        self.session = requests.Session()
-        self.session.headers.update({
+        super().__init__()
+        self.headers.update({
             "Authorization": "Bearer {}".format(access_token),
             "Accept": "application/json",
         })
 
     def get(self, url, **kwargs):
         kwargs.setdefault("timeout", SharePointConstants.TIMEOUT_SEC)
-        return self.session.get(url, **kwargs)
+        return super().get(url, **kwargs)
 
     def post(self, url, **kwargs):
         kwargs.setdefault("timeout", SharePointConstants.TIMEOUT_SEC)
-        return self.session.post(url, **kwargs)
+        return super().post(url, **kwargs)
 
     def put(self, url, **kwargs):
         kwargs.setdefault("timeout", SharePointConstants.TIMEOUT_SEC)
-        return self.session.put(url, **kwargs)
+        return super().put(url, **kwargs)
 
     def patch(self, url, **kwargs):
         kwargs.setdefault("timeout", SharePointConstants.TIMEOUT_SEC)
-        return self.session.patch(url, **kwargs)
+        return super().patch(url, **kwargs)
 
     def delete(self, url, **kwargs):
         kwargs.setdefault("timeout", SharePointConstants.TIMEOUT_SEC)
-        return self.session.delete(url, **kwargs)
+        return super().delete(url, **kwargs)
 
     def request(self, method, url, **kwargs):
         kwargs.setdefault("timeout", SharePointConstants.TIMEOUT_SEC)
-        return self.session.request(method, url, **kwargs)
-
-    def close(self):
-        logger.info("Closing GraphSession.")
-        self.session.close()
+        return super().request(method, url, **kwargs)
 
 
 class SuppressFilter(logging.Filter):

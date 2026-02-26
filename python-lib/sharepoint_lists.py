@@ -106,7 +106,13 @@ class SharePointListWriter(object):
             logger.info('New list "{}" created, type {}'.format(self.list_item_entity_type_full_name, self.entity_type_name))
             self.list_id = created_list.get("Id")
             self.web_name = self.client.get_web_name(created_list) or self.client.sharepoint_list_title
-            self.client.get_read_schema(write_mode=write_mode)
+            # New list is empty — reset column caches directly instead of fetching schema
+            self.client.column_ids = {}
+            self.client.column_names = {}
+            self.client.column_entity_property_name = {}
+            self.client.columns_to_format = []
+            self.client.column_sharepoint_type = {}
+            self.client.dss_column_name = {}
         else:
             self.client.get_read_schema()
             list_metadata = self.client.get_list_metadata(self.client.sharepoint_list_title)

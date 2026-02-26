@@ -4,7 +4,6 @@ from sharepoint_client import SharePointClient
 from sharepoint_constants import SharePointConstants
 from sharepoint_lists import assert_list_title
 from sharepoint_lists import column_ids_to_names, sharepoint_to_dss_date
-from common import parse_query_string_to_dict
 from safe_logger import SafeLogger
 from dss_constants import DSSConstants
 
@@ -59,49 +58,15 @@ class SharePointListsConnector(Connector):
 
     def generate_rows(self, dataset_schema=None, dataset_partitioning=None,
                       partition_id=None, records_limit=-1):
-        if self.client.column_ids == {}:
-            self.client.get_read_schema()
-
         logger.info('generate_row:dataset_schema={}, dataset_partitioning={}, partition_id={}, records_limit={}'.format(
             dataset_schema, dataset_partitioning, partition_id, records_limit
         ))
-
-        page = {}
-        record_count = 0
-        is_first_run = True
         is_record_limit = records_limit > 0
-        while is_first_run or self.is_not_last_page(page):
-            is_first_run = False
-            page = self.client.get_list_items(
-                self.sharepoint_list_title,
-                params=self.get_requests_params(page)
-            )
-            rows = self.get_page_rows(page)
-            for row in rows:
-                row = self.format_row(row)
-                yield column_ids_to_names(self.client.dss_column_name, row)
-            record_count += len(rows)
+        result = self.client.get_list_items(self.sharepoint_list_title)
+        for record_count, row in enumerate(result.get("Row", [])):
             if is_record_limit and record_count >= records_limit:
                 break
-
-    @staticmethod
-    def is_not_last_page(page):
-        return "Row" in page and "NextHref" in page
-
-    def get_requests_params(self, page):
-        next_page_query_string = page.get("NextHref", "")
-        next_page_requests_params = parse_query_string_to_dict(next_page_query_string)
-        if self.sharepoint_list_view_id:
-            next_page_requests_params.update(
-                {
-                    "View": self.sharepoint_list_view_id
-                }
-            )
-        return next_page_requests_params
-
-    @staticmethod
-    def get_page_rows(page):
-        return page.get("Row", "")
+            yield column_ids_to_names(self.client.dss_column_name, self.format_row(row))
 
     def format_row(self, row):
         for column_to_format, type_to_process in self.client.columns_to_format:

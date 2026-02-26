@@ -2,30 +2,18 @@ import os.path
 
 from datetime import datetime
 from common import get_lnt_path, get_rel_path
+from dss_constants import DSSConstants
 
 
-# Key used by SharePointClient methods to wrap Graph driveItem arrays
-ITEMS_KEY = "items"
-
-
-def loop_sharepoint_items(items):
-    if ITEMS_KEY not in items or not items[ITEMS_KEY]:
-        return
-    for item in items[ITEMS_KEY]:
-        yield item
-
-
-def extract_item_from(item_name, items):
-    for item in loop_sharepoint_items(items):
-        if item and "name" in item and item["name"] == item_name:
-            return item
-    return None
-
-
-def has_sharepoint_items(items):
-    if ITEMS_KEY not in items or not items[ITEMS_KEY]:
-        return False
-    return len(items[ITEMS_KEY]) > 0
+def build_dss_item(path: str, item: dict):
+    path = path.replace(item["name"], "")
+    return {
+        DSSConstants.FULL_PATH: get_lnt_path(os.path.join(path, item["name"])),
+        DSSConstants.EXISTS: True,
+        DSSConstants.DIRECTORY: "folder" in item,
+        DSSConstants.SIZE: get_size(item),
+        DSSConstants.LAST_MODIFIED: get_last_modified(item),
+    }
 
 
 def get_last_modified(item):

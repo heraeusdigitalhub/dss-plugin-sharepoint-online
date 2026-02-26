@@ -1,13 +1,17 @@
-from dataiku.fsprovider import FSProvider
-
 import os
 import shutil
 
-from sharepoint_client import SharePointClient
+from common import (
+    assert_no_percent_in_path,
+    assert_valid_sharepoint_path,
+    get_lnt_path,
+    get_rel_path,
+)
+from dataiku.fsprovider import FSProvider
 from dss_constants import DSSConstants
-from sharepoint_items import loop_sharepoint_items, has_sharepoint_items, extract_item_from, get_size, get_last_modified, get_name, assert_path_is_not_root
-from common import get_rel_path, get_lnt_path, assert_valid_sharepoint_path, assert_no_percent_in_path
 from safe_logger import SafeLogger
+from sharepoint_client import SharePointClient
+from sharepoint_items import assert_path_is_not_root, get_name, build_dss_item
 
 try:
     from BytesIO import BytesIO  # for Python 2
@@ -51,43 +55,16 @@ class SharePointFSProvider(FSProvider):
         assert_valid_sharepoint_path(path)
         full_path = get_lnt_path(self.get_full_path(path))
         logger.info('stat:path="{}", full_path="{}"'.format(path, full_path))
-        files = self.client.get_files(full_path)
-        folders = self.client.get_folders(full_path)
-
-        if has_sharepoint_items(files) or has_sharepoint_items(folders):
-            return {
-                DSSConstants.PATH: get_lnt_path(path),
-                DSSConstants.SIZE: 0,
-                DSSConstants.IS_DIRECTORY: True
-            }
-
-        path_to_item, item_name = os.path.split(full_path)
-        files = self.client.get_files(path_to_item)
-        folders = self.client.get_folders(path_to_item)
-
-        file = extract_item_from(item_name, files)
-        folder = extract_item_from(item_name, folders)
-
-        if folder is not None:
-            return {
-                DSSConstants.PATH: get_lnt_path(path),
-                DSSConstants.SIZE: 0,
-                DSSConstants.LAST_MODIFIED: get_last_modified(folder),
-                DSSConstants.IS_DIRECTORY: True
-            }
-        if file is not None:
-            return {
-                DSSConstants.PATH: get_lnt_path(path),
-                DSSConstants.SIZE: get_size(file),
-                DSSConstants.LAST_MODIFIED: get_last_modified(file),
-                DSSConstants.IS_DIRECTORY: False
-            }
+        item = self.client.get_item(full_path)
+        if item:
+            return build_dss_item(path, item)
         return None
 
     def set_last_modified(self, path, last_modified):
         full_path = self.get_full_path(path)
         logger.info('set_last_modified: path="{}", full_path="{}"'.format(path, full_path))
         return False
+    
 
     def browse(self, path):
         assert_valid_sharepoint_path(path)
@@ -95,26 +72,13 @@ class SharePointFSProvider(FSProvider):
         full_path = get_lnt_path(self.get_full_path(path))
         logger.info('browse:path="{}", full_path="{}"'.format(path, full_path))
 
-        folders = self.client.get_folders(full_path)
-        files = self.client.get_files(full_path)
+        files, folders = self.client.list_folder_items(full_path)
         children = []
 
-        for file in loop_sharepoint_items(files):
-            children.append({
-                DSSConstants.FULL_PATH: get_lnt_path(os.path.join(path, get_name(file))),
-                DSSConstants.EXISTS: True,
-                DSSConstants.DIRECTORY: False,
-                DSSConstants.SIZE: get_size(file),
-                DSSConstants.LAST_MODIFIED: get_last_modified(file)
-            })
-        for folder in loop_sharepoint_items(folders):
-            children.append({
-                DSSConstants.FULL_PATH: get_lnt_path(os.path.join(path, get_name(folder))),
-                DSSConstants.EXISTS: True,
-                DSSConstants.DIRECTORY: True,
-                DSSConstants.SIZE: 0,
-                DSSConstants.LAST_MODIFIED: get_last_modified(folder)
-            })
+        for file in files:
+            children.append(build_dss_item(path, file))
+        for folder in folders:
+            children.append(build_dss_item(path, folder))
 
         if len(children) > 0:
             return {
@@ -123,53 +87,38 @@ class SharePointFSProvider(FSProvider):
                 DSSConstants.DIRECTORY: True,
                 DSSConstants.CHILDREN: children
             }
-        path_to_file, file_name = os.path.split(full_path)
-
-        files = self.client.get_files(path_to_file)
-
-        for file in loop_sharepoint_items(files):
-            if get_name(file) == file_name:
-                return {
-                    DSSConstants.FULL_PATH: get_lnt_path(path),
-                    DSSConstants.EXISTS: True, DSSConstants.SIZE: get_size(file),
-                    DSSConstants.LAST_MODIFIED: get_last_modified(file),
-                    DSSConstants.DIRECTORY: False
-                }
-
-        parent_path, item_name = os.path.split(full_path)
-        folders = self.client.get_folders(parent_path)
-        folder = extract_item_from(item_name, folders)
-        if folder is None:
-            ret = {
-                DSSConstants.FULL_PATH: None,
-                DSSConstants.EXISTS: False
+        
+        item = self.client.get_item(full_path)
+        if item:
+            return {
+                **build_dss_item(path, item),
+                DSSConstants.FULL_PATH: get_lnt_path(path),
             }
         else:
-            ret = {
+            return {
                 DSSConstants.FULL_PATH: get_lnt_path(path),
-                DSSConstants.EXISTS: True,
-                DSSConstants.DIRECTORY: True,
-                DSSConstants.SIZE: 0
+                DSSConstants.EXISTS: False
             }
-        return ret
 
     def enumerate(self, path, first_non_empty):
         assert_valid_sharepoint_path(path)
         full_path = get_lnt_path(self.get_full_path(path))
         logger.info('enumerate:path="{}",fullpath="{}", first_non_empty="{}"'.format(path, full_path, first_non_empty))
         path_to_item, item_name = os.path.split(full_path)
-        is_file = self.client.is_file(full_path)
-        if is_file:
-            return [{
-                DSSConstants.PATH: path
-            }]
+        item = self.client.get_item(full_path)
+        if item and "file" in item:
+            return [build_dss_item(path, item)]
         ret = self.list_recursive(path, full_path, first_non_empty)
         return ret
 
     def list_recursive(self, path, full_path, first_non_empty):
         paths = []
-        folders = self.client.get_folders(full_path)
-        for folder in loop_sharepoint_items(folders):
+        files, folders = self.client.list_folder_items(full_path)
+        for file in files:
+            paths.append(build_dss_item(path, file))
+            if first_non_empty:
+                return paths
+        for folder in folders:
             paths.extend(
                 self.list_recursive(
                     get_lnt_path(os.path.join(path, get_name(folder))),
@@ -177,15 +126,6 @@ class SharePointFSProvider(FSProvider):
                     first_non_empty
                 )
             )
-        files = self.client.get_files(full_path)
-        for file in loop_sharepoint_items(files):
-            paths.append({
-                DSSConstants.PATH: get_lnt_path(os.path.join(path, get_name(file))),
-                DSSConstants.LAST_MODIFIED: get_last_modified(file),
-                DSSConstants.SIZE: get_size(file)
-            })
-            if first_non_empty:
-                return paths
         return paths
 
     def delete_recursive(self, path):
@@ -193,24 +133,12 @@ class SharePointFSProvider(FSProvider):
         full_path = self.get_full_path(path)
         logger.info('delete_recursive:path={},fullpath={}'.format(path, full_path))
         assert_path_is_not_root(full_path)
-        path_to_item, item_name = os.path.split(full_path.rstrip("/"))
-        files = self.client.get_files(path_to_item)
-        folders = self.client.get_folders(path_to_item)
-        file = extract_item_from(item_name, files)
-        folder = extract_item_from(item_name, folders)
-
-        if file is not None and folder is not None:
-            raise Exception("Ambiguous naming with file / folder {}".format(item_name))
-
-        if file is not None:
-            self.client.recycle_file(get_lnt_path(full_path))
+        item = self.client.get_item(get_lnt_path(full_path))
+        if item:
+            self.client.recycle(get_lnt_path(full_path))
             return 1
-
-        if folder is not None:
-            self.client.recycle_folder(get_lnt_path(full_path))
-            return 1
-
         return 0
+
 
     def move(self, from_path, to_path):
         assert_valid_sharepoint_path(from_path)
@@ -222,7 +150,6 @@ class SharePointFSProvider(FSProvider):
         logger.info('move:from={},to={}'.format(full_from_path, full_to_path))
 
         self.client.move_file(full_from_path, full_to_path)
-        # SP Online now returns {'odata.null': True}
         return True
 
     def read(self, path, stream, limit):
@@ -240,8 +167,6 @@ class SharePointFSProvider(FSProvider):
         bio = BytesIO()
         shutil.copyfileobj(stream, bio)
         bio.seek(0)
-        data = bio.read()
         self.client.create_path(full_path)
-        response = self.client.write_file_content(full_path, data)
+        response = self.client.write_file_content(full_path, bio)
         logger.info("write:response={}".format(response))
-        self.client.check_in_file(full_path)
