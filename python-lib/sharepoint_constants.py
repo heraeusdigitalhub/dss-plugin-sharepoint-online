@@ -66,7 +66,7 @@ class SharePointConstants(object):
     # SharePoint type mappings (SharePoint type -> DSS type)
     TYPES = {
         "Text": "string",
-        "Number": "string",
+        "Number": "double",
         "DateTime": "date",
         "Boolean": "string",
         "URL": "object",

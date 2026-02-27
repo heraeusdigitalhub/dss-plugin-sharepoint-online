@@ -236,14 +236,18 @@ class SharePointClient():
         if list_title in self._list_id_cache:
             return self._list_id_cache[list_title]
         url = "{}/sites/{}/lists".format(SharePointConstants.GRAPH_API_BASE_URL, self.site_id)
-        params = {"$filter": "displayName eq '{}'".format(list_title.replace("'", "''"))}
-        response = self.session.get(url, params=params)
+        response = self.session.get(url)
         self.assert_response_ok(response, calling_method="_resolve_list_id")
         lists = response.json().get("value", [])
-        if not lists:
+        for l in lists:
+            if l["list"]["template"] == "webTemplateExtensionList":
+                continue
+            self._list_id_cache[l.get("displayName", "")] = l["id"]
+            self._list_id_cache[l.get("name", "")] = l["id"]
+        try:
+            list_id = self._list_id_cache[list_title]
+        except KeyError:
             raise SharePointClientError("List '{}' not found".format(list_title))
-        list_id = lists[0]["id"]
-        self._list_id_cache[list_title] = list_id
         return list_id
 
     # ---- URL/path helpers ----
@@ -484,16 +488,14 @@ class SharePointClient():
             "$expand": "fields",
             "$top": "5000"
         }
-        all_rows = []
         while url:
             response = self.session.get(url, params=graph_params)
             self.assert_response_ok(response, calling_method="get_list_items")
             json_response = response.json()
             for item in json_response.get("value", []):
-                all_rows.append(item.get("fields", {}))
+                yield item.get("fields", {})
             url = json_response.get("@odata.nextLink")
             graph_params = None  # nextLink already encodes all query params
-        return {"Row": all_rows}
 
     def create_list(self, list_name):
         url = self._get_list_url()

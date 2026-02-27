@@ -24,11 +24,11 @@ class SharePointListsConnector(Connector):
         advanced_parameters = config.get("advanced_parameters", False)
         if not advanced_parameters:
             self.max_workers = 1  # no multithread per default
-            self.batch_size = 100
+            self.batch_size = 5000
             self.sharepoint_list_view_title = ""
         else:
             self.max_workers = config.get("max_workers", 1)
-            self.batch_size = config.get("batch_size", 100)
+            self.batch_size = config.get("batch_size", 5000)
             self.sharepoint_list_view_title = config.get("sharepoint_list_view_title", "")
         logger.info("init:advanced_parameters={}, max_workers={}, batch_size={}".format(advanced_parameters, self.max_workers, self.batch_size))
         self.metadata_to_retrieve.append("Title")
@@ -62,8 +62,7 @@ class SharePointListsConnector(Connector):
             dataset_schema, dataset_partitioning, partition_id, records_limit
         ))
         is_record_limit = records_limit > 0
-        result = self.client.get_list_items(self.sharepoint_list_title)
-        for record_count, row in enumerate(result.get("Row", [])):
+        for record_count, row in enumerate(self.client.get_list_items(self.sharepoint_list_title)):
             if is_record_limit and record_count >= records_limit:
                 break
             yield column_ids_to_names(self.client.dss_column_name, self.format_row(row))
