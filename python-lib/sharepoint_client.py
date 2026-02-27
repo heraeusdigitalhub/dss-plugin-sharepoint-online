@@ -49,8 +49,8 @@ class SharePointClient():
 
         # Graph API IDs resolved after auth
         self.site_id = None
-        self.drive_id = None
         self._drive_path_prefix = ""
+        self._drive_id_cache = {}
         self._list_id_cache = {}
 
         if config.get('auth_type') == DSSConstants.AUTH_OAUTH:
@@ -134,9 +134,8 @@ class SharePointClient():
         except Exception as err:
             logging.warning("Error while adding filter to urllib3.connectionpool logs: {}".format(err))
 
-        # Resolve Graph API site and drive IDs
+        # Resolve Graph API site ID
         self._resolve_site_id()
-        self._resolve_drive_id()
 
     # ---- Setup methods ----
 
@@ -197,30 +196,38 @@ class SharePointClient():
         self.site_id = response.json()["id"]
         logger.info("Resolved site_id={}".format(self.site_id))
 
-    def _resolve_drive_id(self):
-        root_parts = self.sharepoint_root.split("/", 1) if self.sharepoint_root else self.config.get("path", "").strip("/").split("/", 1)
+    def _resolve_drive_id(self, path=""):
+        if self.sharepoint_root:
+            root_parts = self.sharepoint_root.split("/", 1)
+            self._drive_path_prefix = root_parts[1] if len(root_parts) > 1 else ""
+        else:
+            root_parts = [path.strip("/").split("/", 1)[0]]
         root_library_name = root_parts[0]
-        remaining_path = root_parts[1] if len(root_parts) > 1 else ""
 
-        # List all drives to find one matching the root library name
+        # Search for drive in Cache
+        if root_library_name.lower() in self._drive_id_cache:
+            drive_id = self._drive_id_cache[root_library_name.lower()]
+            logger.debug("Resolved drive_id={}, path={}, path_prefix={}".format(drive_id, root_library_name, self._drive_path_prefix))
+            return drive_id
+
+        # List all drives to add to cache
         url = "{}/sites/{}/drives".format(SharePointConstants.GRAPH_API_BASE_URL, self.site_id)
         response = self.session.get(url)
         self.assert_response_ok(response, calling_method="_resolve_drive_id")
         drives = response.json().get("value", [])
 
         for drive in drives:
-            if drive.get("name") == root_library_name:
-                self.drive_id = drive["id"]
-                self._drive_path_prefix = remaining_path
-                logger.info("Resolved drive_id={} (by name), path_prefix={}".format(self.drive_id, self._drive_path_prefix))
-                return
-            web_url = drive.get("webUrl", "")
-            decoded_web_url = urllib.parse.unquote(web_url)
-            if decoded_web_url.lower().endswith("/" + root_library_name.lower()):
-                self.drive_id = drive["id"]
-                self._drive_path_prefix = remaining_path
-                logger.info("Resolved drive_id={} (by webUrl '{}'), path_prefix={}".format(self.drive_id, web_url, self._drive_path_prefix))
-                return
+            if drive.get("name"):
+                self._drive_id_cache[drive["name"].lower()] = drive["id"]
+            if drive.get("webUrl"):
+                decoded_web_url = urllib.parse.unquote(drive["webUrl"])
+                self._drive_id_cache[decoded_web_url.rsplit("/", 1)[-1].lower()] = drive["id"]
+        
+        # Search for drive in Cache after updating it with the list of drives from Graph API
+        if root_library_name.lower() in self._drive_id_cache:
+            drive_id = self._drive_id_cache[root_library_name.lower()]
+            logger.info("Resolved drive_id={}, path={}, path_prefix={}".format(drive_id, root_library_name, self._drive_path_prefix))
+            return drive_id
 
         # No match: raise to be explicit about missing root path
         raise SharePointClientError("Drive with root path '{}' not found".format(root_library_name))
@@ -253,17 +260,21 @@ class SharePointClient():
 
     def _get_drive_item_url(self, path, suffix=""):
         full_path = self._build_drive_path(path)
+        drive_id = self._resolve_drive_id(full_path)
+        # if sharepoint_root is not set, ignore the first path segment to be compatible with old configs
+        if not self.sharepoint_root:
+            full_path = full_path.split("/", 1)[-1] if "/" in full_path else ""
         if full_path:
             encoded_path = urllib.parse.quote(full_path, safe="/")
             if suffix:
                 return "{}/drives/{}/root:/{}:{}".format(
-                    SharePointConstants.GRAPH_API_BASE_URL, self.drive_id, encoded_path, suffix)
+                    SharePointConstants.GRAPH_API_BASE_URL, drive_id, encoded_path, suffix)
             else:
                 return "{}/drives/{}/root:/{}".format(
-                    SharePointConstants.GRAPH_API_BASE_URL, self.drive_id, encoded_path)
+                    SharePointConstants.GRAPH_API_BASE_URL, drive_id, encoded_path)
         else:
             return "{}/drives/{}/root{}".format(
-                SharePointConstants.GRAPH_API_BASE_URL, self.drive_id, suffix)
+                SharePointConstants.GRAPH_API_BASE_URL, drive_id, suffix)
 
     def _get_list_url(self, list_id=None):
         if list_id:
