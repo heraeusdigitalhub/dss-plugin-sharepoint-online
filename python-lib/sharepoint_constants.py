@@ -22,6 +22,28 @@ class SharePointConstants(object):
     VALUE = 'value'
     FALLBACK_TYPE = "Text"
 
+    # Columns to ingore
+    COLUMNS_TO_IGNORE_BY_INTERNAL_NAME = [
+        "LinkTitle",
+        "_ColorTag",
+        "ComplianceAssetId",
+        "ContentType",
+        "_UIVersionString",
+        "Attachments",
+        "Edit",
+        "LinkTitleNoMenu",
+        "DocIcon",
+        "ItemChildCount",
+        "FolderChildCount",
+        "_ComplianceFlags",
+        "_ComplianceTag",
+        "_ComplianceTagWrittenTime",
+        "_ComplianceTagUserId",
+        "_IsRecord",
+        "AppAuthor",
+        "AppEditor"
+    ]
+
     # DriveItem property names (Graph API format)
     NAME = 'name'
     LENGTH = 'size'

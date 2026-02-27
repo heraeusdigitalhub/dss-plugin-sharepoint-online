@@ -764,6 +764,8 @@ class SharePointClient():
         self.column_entity_property_name = {}
         self.columns_to_format = []
         for column in sharepoint_columns:
+            if column[SharePointConstants.INTERNAL_NAME] in SharePointConstants.COLUMNS_TO_IGNORE_BY_INTERNAL_NAME:
+                continue
             logger.info("get_read_schema:{}/{}/{}/{}/{}/{}".format(
                 column[SharePointConstants.TITLE_COLUMN],
                 column[SharePointConstants.TYPE_AS_STRING],
