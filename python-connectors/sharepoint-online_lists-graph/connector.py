@@ -61,10 +61,7 @@ class SharePointListsConnector(Connector):
         logger.info('generate_row:dataset_schema={}, dataset_partitioning={}, partition_id={}, records_limit={}'.format(
             dataset_schema, dataset_partitioning, partition_id, records_limit
         ))
-        is_record_limit = records_limit > 0
-        for record_count, row in enumerate(self.client.get_list_items(self.sharepoint_list_title)):
-            if is_record_limit and record_count >= records_limit:
-                break
+        for row in self.client.get_list_items(self.sharepoint_list_title, records_limit=records_limit):
             yield column_ids_to_names(self.client.dss_column_name, self.format_row(row))
 
     def format_row(self, row):

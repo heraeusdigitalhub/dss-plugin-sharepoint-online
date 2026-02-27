@@ -481,18 +481,22 @@ class SharePointClient():
                 return sp_type
         return SharePointConstants.FALLBACK_TYPE
 
-    def get_list_items(self, list_title):
+    def get_list_items(self, list_title, records_limit=-1):
         list_id = self._resolve_list_id(list_title)
         url = "{}/items".format(self._get_list_url(list_id))
         graph_params = {
             "$expand": "fields",
-            "$top": "5000"
+            "$top": "5000" if records_limit < 1 else str(records_limit)
         }
+        record_count = 0
         while url:
             response = self.session.get(url, params=graph_params)
             self.assert_response_ok(response, calling_method="get_list_items")
             json_response = response.json()
             for item in json_response.get("value", []):
+                if records_limit > 0 and record_count >= records_limit:
+                    return
+                record_count += 1
                 yield item.get("fields", {})
             url = json_response.get("@odata.nextLink")
             graph_params = None  # nextLink already encodes all query params
