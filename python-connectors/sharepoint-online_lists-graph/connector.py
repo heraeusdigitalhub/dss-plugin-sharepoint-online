@@ -37,6 +37,8 @@ class SharePointListsConnector(Connector):
         self.sharepoint_list_view_id = None
         if self.sharepoint_list_view_title:
             self.sharepoint_list_view_id = self.client.get_view_id(self.sharepoint_list_title, self.sharepoint_list_view_title)
+        # Pre-fetch schema to check connectivity and configuration validity at initialization
+        self.get_read_schema()
 
     def get_read_schema(self):
         return self.client.get_read_schema(display_metadata=self.display_metadata, metadata_to_retrieve=self.metadata_to_retrieve)
