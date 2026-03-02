@@ -74,7 +74,7 @@ class SharePointConstants(object):
         "Computed": None,
         "Attachments": None,
         "Calculated": "string",
-        "User": "array",
+        "User": "string",
         "Thumbnail": "object",
         "Note": "string"
     }

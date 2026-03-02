@@ -485,7 +485,7 @@ class SharePointClient():
         list_id = self._resolve_list_id(list_title)
         url = "{}/items".format(self._get_list_url(list_id))
         graph_params = {
-            "$expand": "fields",
+            "$expand": f"fields($select={','.join(self.column_entity_property_name.keys())})",
             "$top": "5000" if records_limit < 1 else str(records_limit)
         }
         record_count = 0
