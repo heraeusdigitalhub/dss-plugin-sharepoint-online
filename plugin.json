@@ -1,10 +1,10 @@
 {
     "id": "sharepoint-online-graph",
-    "version": "1.2.0",
+    "version": "2.0.0",
     "meta": {
         "label": "SharePoint Online (Graph API)",
         "description": "Read and write data from/to your SharePoint Online account",
-        "author": "Dataiku (Alex Bourret)",
+        "author": "Dataiku (Alex Bourret), Heraeus (Richard Kroegel)",
         "icon": "icon-cloud",
         "category": "Productivity",
         "tags": ["Connector", "Microsoft", "Productivity"],
