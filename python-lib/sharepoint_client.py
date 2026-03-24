@@ -433,7 +433,7 @@ class SharePointClient():
     def check_in_file(self, full_path):
         logger.info("Checking in {}.".format(full_path))
         url = self._get_drive_item_url(full_path, suffix="/checkin")
-        self.session.post(url, json={"comment": "", "checkInAs": "major"})
+        self.session.post(url, json={})
 
     def check_out_file(self, full_path):
         logger.info("Checking out {}.".format(full_path))
