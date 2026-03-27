@@ -72,33 +72,29 @@ class SharePointFSProvider(FSProvider):
         full_path = get_lnt_path(self.get_full_path(path))
         logger.info('browse:path="{}", full_path="{}"'.format(path, full_path))
 
-        files, folders = self.client.list_folder_items(full_path)
-        children = []
-
-        for file in files:
-            children.append(build_dss_item(path, file))
-        for folder in folders:
-            children.append(build_dss_item(path, folder))
-
-        if len(children) > 0:
-            return {
-                DSSConstants.FULL_PATH: get_lnt_path(path),
-                DSSConstants.EXISTS: True,
-                DSSConstants.DIRECTORY: True,
-                DSSConstants.CHILDREN: children
-            }
-        
         item = self.client.get_item(full_path)
-        if item:
-            return {
-                **build_dss_item(path, item),
-                DSSConstants.FULL_PATH: get_lnt_path(path),
-            }
-        else:
+        if not item:
             return {
                 DSSConstants.FULL_PATH: get_lnt_path(path),
                 DSSConstants.EXISTS: False
             }
+        
+        retval = {
+            **build_dss_item(path, item),
+            DSSConstants.FULL_PATH: get_lnt_path(path),
+        }
+        
+        if retval[DSSConstants.DIRECTORY]:
+            files, folders = self.client.list_folder_items(full_path)
+            retval[DSSConstants.CHILDREN] = []
+
+            for file in files:
+                retval[DSSConstants.CHILDREN].append(build_dss_item(path, file))
+            for folder in folders:
+                retval[DSSConstants.CHILDREN].append(build_dss_item(path, folder))
+            return retval
+        else:
+            return retval
 
     def enumerate(self, path, first_non_empty):
         assert_valid_sharepoint_path(path)
