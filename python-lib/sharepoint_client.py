@@ -398,6 +398,9 @@ class SharePointClient():
          Does not create the last element in the end of the path as that is the file we will add later
          (unless it ends in / in which case a folder will be created for that also).
         """
+        # if sharepoint_root is not set, ignore the first path segment to be compatible with old configs
+        if not self.sharepoint_root:
+            file_full_path = file_full_path.split("/", 1)[-1] if "/" in file_full_path else ""
         full_path, filename = os.path.split(file_full_path)
         tokens = full_path.strip("/").split("/")
         path = ""
