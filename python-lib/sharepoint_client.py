@@ -40,7 +40,9 @@ class SharePointClient():
         self.session = RobustSession(status_codes_to_retry=[429, 503], attempt_session_reset_on_403=attempt_session_reset_on_403)
         self.number_dumped_logs = 0
 
-        self.dss_column_name = {}
+        self.dss_column_name = {
+            "id": "ID"  # Graph API always returns id lowercase, although Sharpoint column title is uppercase
+        }
         self.column_ids = {}
         self.column_names = {}
         self.column_entity_property_name = {}
