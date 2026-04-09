@@ -479,10 +479,14 @@ class SharePointClient():
 
     @staticmethod
     def _get_sp_type_from_graph_column(column):
+        if column.get("name", "") == "ID":
+            return "Integer"
         for graph_type, sp_type in SharePointConstants.GRAPH_TO_SP_TYPE_MAP.items():
             if graph_type in column:
                 if graph_type == "text" and column.get("text", {}).get("allowMultipleLines", False):
                     return "Note"
+                if graph_type == "number" and column.get("number", {}).get("decimalPlaces") == 'none':
+                    return "Integer"
                 return sp_type
         return SharePointConstants.FALLBACK_TYPE
 
@@ -798,7 +802,7 @@ class SharePointClient():
                     self.column_entity_property_name[column[SharePointConstants.STATIC_NAME]] = column[SharePointConstants.ENTITY_PROPERTY_NAME]
                     self.dss_column_name[column[SharePointConstants.STATIC_NAME]] = column[SharePointConstants.TITLE_COLUMN]
                     self.dss_column_name[column[SharePointConstants.ENTITY_PROPERTY_NAME]] = column[SharePointConstants.TITLE_COLUMN]
-                if sharepoint_type == "date":
+                if sharepoint_type in ["date", "bigint"]:
                     self.columns_to_format.append((column[SharePointConstants.STATIC_NAME], sharepoint_type))
                 if column[SharePointConstants.TYPE_AS_STRING] == SharePointConstants.TYPE_NOTE:
                     if write_mode == SharePointConstants.WRITE_MODE_CREATE:

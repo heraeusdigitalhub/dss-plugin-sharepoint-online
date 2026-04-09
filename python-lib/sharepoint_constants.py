@@ -67,6 +67,7 @@ class SharePointConstants(object):
     TYPES = {
         "Text": "string",
         "Number": "double",
+        "Integer": "bigint",
         "DateTime": "date",
         "Boolean": "string",
         "URL": "object",

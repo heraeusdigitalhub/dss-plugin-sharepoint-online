@@ -64,14 +64,15 @@ class SharePointListsConnector(Connector):
             dataset_schema, dataset_partitioning, partition_id, records_limit
         ))
         for row in self.client.get_list_items(self.sharepoint_list_title, records_limit=records_limit):
-            yield column_ids_to_names(self.client.dss_column_name, self.format_row(row))
+            yield self.format_row(column_ids_to_names(self.client.dss_column_name, row))
 
     def format_row(self, row):
         for column_to_format, type_to_process in self.client.columns_to_format:
-            if type_to_process == "date":
-                value = row.get(column_to_format)
-                if value:
-                    row[column_to_format] = sharepoint_to_dss_date(value)
+            value = row.get(column_to_format)
+            if type_to_process == "date" and value:
+                row[column_to_format] = sharepoint_to_dss_date(value)
+            elif type_to_process == "bigint" and value is not None:
+                row[column_to_format] = int(value)
         return row
 
     def get_writer(self, dataset_schema=None, dataset_partitioning=None,
