@@ -7,12 +7,15 @@ from dss_constants import DSSConstants
 
 def build_dss_item(path: str, item: dict):
     path = path.replace(item["name"], "")
+    lnt_path = get_lnt_path(os.path.join(path, item["name"]))
     return {
-        DSSConstants.FULL_PATH: get_lnt_path(os.path.join(path, item["name"])),
-        DSSConstants.EXISTS: True,
-        DSSConstants.DIRECTORY: "folder" in item,
-        DSSConstants.SIZE: get_size(item),
-        DSSConstants.LAST_MODIFIED: get_last_modified(item),
+        DSSConstants.PATH: lnt_path,  # for enumerate + stat
+        DSSConstants.FULL_PATH: lnt_path,  # for browse
+        DSSConstants.EXISTS: True,  # for all
+        DSSConstants.DIRECTORY: "folder" in item,  # for browse
+        DSSConstants.IS_DIRECTORY: "folder" in item,  # for stat
+        DSSConstants.SIZE: get_size(item),  # for browse
+        DSSConstants.LAST_MODIFIED: get_last_modified(item), # for browse
     }
 
 
