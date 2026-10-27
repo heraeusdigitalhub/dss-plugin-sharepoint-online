@@ -325,7 +325,7 @@ class SharePointClient():
             "top": "500" if first_non_empty else "2500"
         }
         while url:
-            logger.debug(f"enumerating path={path} URL={url} params={graph_params}")
+            logger.info(f"enumerating path={path} URL={url} params={graph_params}")
             response = self.session.get(url, params=graph_params)
             self.assert_response_ok(response, calling_method="list_enumerate_items")
             json_response = response.json()
