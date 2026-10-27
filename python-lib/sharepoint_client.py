@@ -264,13 +264,13 @@ class SharePointClient():
                 parts.append(clean_path)
         return "/".join(parts)
 
-    def _get_drive_item_url(self, path, suffix=""):
+    def _get_drive_item_url(self, path, suffix="", encode_full_path=True):
         full_path = self._build_drive_path(path)
         drive_id = self._resolve_drive_id(full_path)
         # if sharepoint_root is not set, ignore the first path segment to be compatible with old configs
         if not self.sharepoint_root:
             full_path = full_path.split("/", 1)[-1] if "/" in full_path.lstrip("/") else ""
-        if full_path:
+        if full_path and encode_full_path:
             encoded_path = urllib.parse.quote(full_path, safe="/")
             if suffix:
                 return "{}/drives/{}/root:/{}:{}".format(
@@ -315,14 +315,17 @@ class SharePointClient():
         return files, folders
 
     def list_enumerate_items(self, path, first_non_empty=False):
-        drive_url = self._get_drive_item_url(path)
+        drive_url = self._get_drive_item_url(path, encode_full_path=False)
         url = f"{drive_url}/items"
         drive_base_path = f"{drive_url.replace(SharePointConstants.GRAPH_API_BASE_URL, '')}:"
+        path = path.strip("/")
+        if not self.sharepoint_root:
+            path = path.split("/", 1)[-1] if "/" in path else ""
         search_path = f"{drive_base_path}/{path.lstrip('/')}"
 
         graph_params = {
             "filter": "folder eq null",
-            "top": "500" if first_non_empty else "2500"
+            "$top": "500" if first_non_empty else "2500"
         }
         while url:
             logger.info(f"enumerating path={path} URL={url} params={graph_params}")
@@ -334,15 +337,15 @@ class SharePointClient():
                 # Skip items that are not under the current search path
                 if not drive_full_path.startswith(search_path):
                     continue
-                full_path = drive_full_path.replace(drive_base_path, "")
+                full_path = drive_full_path.replace(search_path, "")
                 file_item = {
                     "id": item.get("id"),
                     "name": full_path,
                     "size": item.get("size"),
                     "file_quickxorhash": item.get("file", {}).get("hashes", {}).get("quickXorHash"),
                     "file_sensitive": item.get("file", {}).get("contentSensitivityLabelProtected", False),
-                    "created": item.get("fileSystemInfo", {}).get("createdDateTime"),
-                    "modified": item.get("fileSystemInfo", {}).get("lastModifiedDateTime")
+                    "createdDateTime": item.get("fileSystemInfo", {}).get("createdDateTime"),
+                    "lastModifiedDateTime": item.get("fileSystemInfo", {}).get("lastModifiedDateTime")
                 }
                 if "folder" in item:
                     file_item["folder"] = True
