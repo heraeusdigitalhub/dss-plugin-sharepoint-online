@@ -108,20 +108,12 @@ class SharePointFSProvider(FSProvider):
         return ret
 
     def list_recursive(self, path, full_path, first_non_empty):
-        paths = []
-        files, folders = self.client.list_folder_items(full_path)
-        for file in files:
-            paths.append(build_dss_item(path, file))
-            if first_non_empty:
-                return paths
-        for folder in folders:
-            paths.extend(
-                self.list_recursive(
-                    get_lnt_path(os.path.join(path, get_name(folder))),
-                    get_lnt_path(os.path.join(full_path, get_name(folder))),
-                    first_non_empty
-                )
-            )
+        paths = [
+            build_dss_item(path, item)
+            for item
+            in self.client.list_enumerate_items(full_path, first_non_empty)
+            if "folder" not in item
+        ]
         return paths
 
     def delete_recursive(self, path):

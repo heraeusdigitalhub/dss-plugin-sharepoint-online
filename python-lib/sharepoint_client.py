@@ -313,6 +313,44 @@ class SharePointClient():
             elif "folder" in i:
                 folders.append(i)
         return files, folders
+
+    def list_enumerate_items(self, path, first_non_empty=False):
+        drive_url = self._get_drive_item_url(path)
+        url = f"{drive_url}/items"
+        drive_base_path = f"{drive_url.replace(SharePointConstants.GRAPH_API_BASE_URL, '')}:"
+        search_path = f"{drive_base_path}/{path.lstrip('/')}"
+
+        graph_params = {
+            "filter": "folder eq null",
+            "top": "500" if first_non_empty else "2500"
+        }
+        while url:
+            logger.debug(f"enumerating path={path} URL={url} params={graph_params}")
+            response = self.session.get(url, params=graph_params)
+            self.assert_response_ok(response, calling_method="list_enumerate_items")
+            json_response = response.json()
+            for item in json_response.get("value", []):
+                drive_full_path = f"{item.get('parentReference', {}).get('path', '')}/{item.get('name')}"
+                # Skip items that are not under the current search path
+                if not drive_full_path.startswith(search_path):
+                    continue
+                full_path = drive_full_path.replace(drive_base_path, "")
+                file_item = {
+                    "id": item.get("id"),
+                    "name": full_path,
+                    "size": item.get("size"),
+                    "file_quickxorhash": item.get("file", {}).get("hashes", {}).get("quickXorHash"),
+                    "file_sensitive": item.get("file", {}).get("contentSensitivityLabelProtected", False),
+                    "created": item.get("fileSystemInfo", {}).get("createdDateTime"),
+                    "modified": item.get("fileSystemInfo", {}).get("lastModifiedDateTime")
+                }
+                if "folder" in item:
+                    file_item["folder"] = True
+                yield file_item
+                if first_non_empty and file_item:
+                    return
+            url = json_response.get("@odata.nextLink")
+            graph_params = None  # nextLink already encodes all query params
     
     def get_item(self, path):
         url = self._get_drive_item_url(path)
