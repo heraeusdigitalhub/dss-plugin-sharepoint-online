@@ -344,6 +344,7 @@ class SharePointClient():
                     "size": item.get("size"),
                     "file_quickxorhash": item.get("file", {}).get("hashes", {}).get("quickXorHash"),
                     "file_sensitive": item.get("file", {}).get("contentSensitivityLabelProtected", False),
+                    "webUrl": item.get("webUrl"),
                     "createdDateTime": item.get("fileSystemInfo", {}).get("createdDateTime"),
                     "lastModifiedDateTime": item.get("fileSystemInfo", {}).get("lastModifiedDateTime")
                 }

@@ -1,0 +1,111 @@
+{
+    "meta": {
+        "label": "List folder with SharePoint details",
+        "description": "List the files of a SharePoint folder with their hash, size, dates and link",
+        "icon": "icon-cloud"
+    },
+    "kind": "PYTHON",
+    "selectableFromFolder": "input_folder",
+    "inputRoles": [
+        {
+            "name": "input_folder",
+            "label": "SharePoint managed folder",
+            "description": "",
+            "arity": "UNARY",
+            "required": true,
+            "acceptsManagedFolder": true,
+            "acceptsDataset": false
+        }
+    ],
+    "outputRoles": [
+        {
+            "name": "output_dataset",
+            "label": "Dataset with file details",
+            "description": "",
+            "arity": "UNARY",
+            "required": true,
+            "acceptsDataset": true
+        }
+    ],
+    "params": [
+        {
+            "name": "auth_type",
+            "label": "Type of authentication",
+            "type": "SELECT",
+            "selectChoices": [
+                {
+                    "value": "oauth",
+                    "label": "Azure Single Sign On"
+                },
+                {
+                    "value": "site-app-permissions",
+                    "label": "Site App Permissions"
+                },
+                {
+                    "value": "app-certificate",
+                    "label": "Certificates"
+                },
+                {
+                    "value": "app-username-password",
+                    "label": "User name / password"
+                }
+            ]
+        },
+        {
+            "name": "sharepoint_oauth",
+            "label": "Azure preset",
+            "type": "PRESET",
+            "parameterSetId": "oauth-login",
+            "visibilityCondition": "model.auth_type == 'oauth'"
+        },
+        {
+            "name": "site_app_permissions",
+            "label": "Site App preset",
+            "type": "PRESET",
+            "parameterSetId": "site-app-permissions",
+            "visibilityCondition": "model.auth_type == 'site-app-permissions'"
+        },
+        {
+            "name": "app_certificate",
+            "label": "Certificates",
+            "type": "PRESET",
+            "parameterSetId": "app-certificate",
+            "visibilityCondition": "model.auth_type == 'app-certificate'"
+        },
+        {
+            "name": "app_username_password",
+            "label": "App username password",
+            "type": "PRESET",
+            "parameterSetId": "app-username-password",
+            "visibilityCondition": "model.auth_type == 'app-username-password'"
+        },
+        {
+            "name": "advanced_parameters",
+            "label": "Show advanced parameters",
+            "description": "",
+            "type": "BOOLEAN",
+            "defaultValue": false
+        },
+        {
+            "name": "sharepoint_site_overwrite",
+            "label": "Site path preset overwrite",
+            "type": "STRING",
+            "description": "sites/site_name/subsite...",
+            "visibilityCondition": "model.advanced_parameters == true"
+        },
+        {
+            "name": "sharepoint_root_overwrite",
+            "label": "Root directory preset overwrite",
+            "type": "STRING",
+            "description": "",
+            "visibilityCondition": "model.advanced_parameters == true"
+        },
+        {
+            "name": "folder_path",
+            "label": "Folder path",
+            "type": "STRING",
+            "defaultValue": "",
+            "description": "Same as the \"Path\" of the managed folder, relative to the library root (e.g. /Folder in Subsite/)"
+        }
+    ]
+}
