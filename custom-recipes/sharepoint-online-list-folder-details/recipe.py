@@ -1,8 +1,11 @@
+import re
+from pathlib import Path
 import dataiku
 from dataiku.customrecipe import get_input_names_for_role, get_output_names_for_role, get_recipe_config
 from safe_logger import SafeLogger
 from dss_constants import DSSConstants
 from sharepoint_client import SharePointClient
+from sharepoint_lists import sharepoint_to_dss_date
 from common import get_lnt_path
 
 logger = SafeLogger("sharepoint-online plugin", DSSConstants.SECRET_PARAMETERS_KEYS)
@@ -43,11 +46,17 @@ assert_same_config_as_folder(config, get_input_names_for_role('input_folder')[0]
 
 client = SharePointClient(config)
 
+RE_FILENAME = re.compile(r'\.(?=[a-zA-Z0-9]+\.[a-zA-Z]+$|[a-zA-Z0-9]+$)')
+
 output_dataset.write_schema([
+    # DSS list_folder_contents default columns - start
     {"name": "path", "type": "string"},
+    {"name": "basename", "type": "string"},
+    {"name": "extension", "type": "string"},
+    {"name": "last_modified", "type": "date"},
     {"name": "size", "type": "bigint"},
-    {"name": "created", "type": "string"},
-    {"name": "last_modified", "type": "string"},
+    # DSS list_folder_contents default columns - end
+    {"name": "created", "type": "date"},
     {"name": "quickxorhash", "type": "string"},
     {"name": "web_url", "type": "string"},
 ])
@@ -55,11 +64,20 @@ with output_dataset.get_writer() as writer:
     for item in client.list_enumerate_items(folder_path):
         if item.get("folder"):
             continue
+        # special basename/ext handling to align with Dataiku's list_folder_contents recipe
+        item_as_path = Path(item.get("name"))
+        parts = RE_FILENAME.split(item_as_path.name, maxsplit=1)
+        if len(parts) == 2:
+            basename, extension = parts
+        else:
+            basename, extension = item_as_path.stem, item_as_path.suffix.lstrip(".")
         writer.write_row_dict({
             "path": item.get("name"),
+            "basename": basename,
+            "extension": extension,
+            "last_modified": sharepoint_to_dss_date(item.get("lastModifiedDateTime")),
             "size": item.get("size"),
-            "created": item.get("createdDateTime"),
-            "last_modified": item.get("lastModifiedDateTime"),
+            "created": sharepoint_to_dss_date(item.get("createdDateTime")),
             "quickxorhash": item.get("file_quickxorhash"),
             "web_url": item.get("webUrl"),
         })

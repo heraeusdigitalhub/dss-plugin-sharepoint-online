@@ -2,7 +2,7 @@
     "meta": {
         "label": "List folder with SharePoint details",
         "description": "List the files of a SharePoint folder with their hash, size, dates and link",
-        "icon": "icon-cloud"
+        "icon": "fas fa-list-alt"
     },
     "kind": "PYTHON",
     "selectableFromFolder": "input_folder",
